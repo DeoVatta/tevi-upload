@@ -4,18 +4,30 @@
 
 ## Status
 
-**Implementation in progress.** See [phases.md](phases.md) for detailed build plan.
+**Version**: 3.1 — Audit Fixes
 
-- [x] PRD v3 — Complete technical specification
+- [x] PRD v3.1 — Complete technical specification (audit fixes applied)
 - [x] phases.md — Implementation guide (7 phases, ~17-25 hours)
 - [ ] Phase 0 — Prerequisites (VPS, N8N, GDrive setup)
 - [ ] Phase 1 — VPS Executor (server.js + PM2)
 - [ ] Phase 2 — Config System (config.json + state.json + Config Workflow)
-- [ ] Phase 3 — N8N Main Workflow (34 nodes)
+- [ ] Phase 3 — N8N Main Workflow (31 nodes)
 - [ ] Phase 4 — AI Caption System (5-layer pipeline)
 - [ ] Phase 5 — Testing (integration tests)
 - [ ] Phase 6 — Documentation (setup docs)
 - [ ] Phase 7 — Cleanup & Deploy (production ready)
+
+## Security
+
+All credentials stored in **N8N Credentials** (encrypted at rest):
+- TEVI Account, VPS SSH/SFTP, Google Drive OAuth2, Email SMTP, AI Service
+- Zero credentials in workflow JSON exports
+- Zero credentials in config.json (safe to commit to git)
+- Zero credentials in server.js
+
+All paths and AI settings stored in **N8N Variables** (editable in UI).
+
+See [phases.md](phases.md) Phase 7 for the full security audit checklist.
 
 ## What's Here
 
