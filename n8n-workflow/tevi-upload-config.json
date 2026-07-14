@@ -1,0 +1,433 @@
+{
+  "name": "TEVI Upload — Config Editor",
+  "nodes": [
+    {
+      "id": "trigger-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [100, 300]
+    },
+    {
+      "id": "download-config",
+      "name": "Download Config",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [320, 300],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "download",
+        "filePath": "={{ $vars.VPS_UPLOAD_DIR }}/config.json"
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "parse-config",
+      "name": "Parse Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [540, 300],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// Handle both string and object input from SFTP\nlet config;\nif (typeof input === 'string') {\n  try { config = JSON.parse(input); } catch {\n    config = { version: null, categories: [] };\n  }\n} else if (input.data) {\n  // Binary data\n  try { config = JSON.parse(input.data.toString()); } catch {\n    config = { version: null, categories: [] };\n  }\n} else {\n  config = input;\n}\n\n// If no config or wrong version, use defaults\nif (!config.version || config.version !== 3) {\n  config = {\n    version: 3,\n    rotation: {\n      enabled: true,\n      order: [],\n      adultSubRotation: ['hentai', 'japanese', 'amerika']\n    },\n    categories: []\n  };\n}\n\nreturn { json: { config, categories: config.categories || [], rotation: config.rotation || {} } };"
+      }
+    },
+    {
+      "id": "form-trigger",
+      "name": "Config Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2,
+      "position": [760, 300],
+      "webhookId": "tevi-upload-config",
+      "parameters": {
+        "headerContent": "",
+        "formTitle": "TEVI Upload Config Editor",
+        "formDescription": "Add, edit, disable, enable, or delete upload categories.",
+        "specifyFields": true,
+        "fields": {
+          "values": [
+            {
+              "fieldLabel": "Action",
+              "fieldName": "action",
+              "required": true,
+              "type": "options",
+              "options": {
+                "values": [
+                  { "label": "View Config", "value": "view" },
+                  { "label": "Add Category", "value": "add" },
+                  { "label": "Edit Category", "value": "edit" },
+                  { "label": "Delete Category", "value": "delete" },
+                  { "label": "Enable Category", "value": "enable" },
+                  { "label": "Disable Category", "value": "disable" },
+                  { "label": "Reorder Rotation", "value": "reorder" }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Category ID",
+              "fieldName": "categoryId",
+              "required": false,
+              "type": "string",
+              "options": {
+                "values": []
+              },
+              "description": "Category ID (alphanumeric + underscore, max 30 chars)"
+            },
+            {
+              "fieldLabel": "Category Display Name",
+              "fieldName": "categoryName",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "fieldLabel": "Category Type",
+              "fieldName": "categoryType",
+              "required": false,
+              "type": "options",
+              "options": {
+                "values": [
+                  { "label": "Standard (Photo/Video)", "value": "standard" },
+                  { "label": "Adult (Sub-category)", "value": "adult" }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "GDrive Folder ID",
+              "fieldName": "gdriveFolderId",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "fieldLabel": "GDrive Folder Name",
+              "fieldName": "gdriveFolderName",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "fieldLabel": "Collection Name",
+              "fieldName": "collection",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "fieldLabel": "Audience",
+              "fieldName": "audience",
+              "required": false,
+              "type": "options",
+              "options": {
+                "values": [
+                  { "label": "Paid (⭐)", "value": "paid" },
+                  { "label": "Free", "value": "free" }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Price (Stars)",
+              "fieldName": "price",
+              "required": false,
+              "type": "number",
+              "typeOptions": {
+                "minValue": 1,
+                "maxValue": 9999
+              }
+            },
+            {
+              "fieldLabel": "Always Members Only",
+              "fieldName": "alwaysMembers",
+              "required": false,
+              "type": "options",
+              "options": {
+                "values": [
+                  { "label": "No", "value": false },
+                  { "label": "Yes (Members Only)", "value": true }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Caption Suffix",
+              "fieldName": "captionSuffix",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "fieldLabel": "AI Translate",
+              "fieldName": "aiTranslate",
+              "required": false,
+              "type": "options",
+              "options": {
+                "values": [
+                  { "label": "No (Random caption)", "value": false },
+                  { "label": "Yes (AI translate)", "value": true }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "AI Prompt (for adult content)",
+              "fieldName": "aiPrompt",
+              "required": false,
+              "type": "string",
+              "description": "Override default AI translation prompt"
+            },
+            {
+              "fieldLabel": "Captions (one per line)",
+              "fieldName": "captions",
+              "required": false,
+              "type": "string",
+              "description": "Used when AI Translate is OFF. One caption per line, randomly picked."
+            },
+            {
+              "fieldLabel": "Rotation Order (comma-separated IDs)",
+              "fieldName": "rotationOrder",
+              "required": false,
+              "type": "string",
+              "description": "Comma-separated category IDs, e.g. photo,video,adult"
+            },
+            {
+              "fieldLabel": "Confirm Action",
+              "fieldName": "confirmed",
+              "required": true,
+              "type": "options",
+              "options": {
+                "values": [
+                  { "label": "No — just preview", "value": false },
+                  { "label": "Yes — save to VPS", "value": true }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "detect-action",
+      "name": "Detect Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, 300],
+      "parameters": {
+        "jsCode": "const formData = $input.first().json;\nconst configData = $('Parse Config').first().json;\nconst config = configData.config;\n\nconst action = formData.action || 'view';\nconst confirmed = formData.confirmed === true;\n\nconst result = {\n  action,\n  confirmed,\n  formData,\n  config,\n  errors: [],\n  warnings: []\n};\n\n// Validate based on action\nswitch (action) {\n  case 'add':\n    if (!formData.categoryId || !/^[a-z0-9_]{1,30}$/.test(formData.categoryId)) {\n      result.errors.push({ field: 'categoryId', message: 'ID: alphanumeric + underscore, max 30 chars' });\n    }\n    if (!formData.gdriveFolderId) {\n      result.errors.push({ field: 'gdriveFolderId', message: 'At least one GDrive folder ID required' });\n    }\n    if (config.categories.some(c => c.id === formData.categoryId)) {\n      result.errors.push({ field: 'categoryId', message: `Category ID '${formData.categoryId}' already exists` });\n    }\n    if (config.categories.length >= 10) {\n      result.errors.push({ field: 'categoryId', message: 'Maximum 10 categories reached' });\n    }\n    if (formData.categoryType === 'adult' && !formData.captions && formData.aiTranslate !== true) {\n      result.warnings.push({ field: 'captions', message: 'Adult category with no captions and no AI translate — will use default' });\n    }\n    break;\n\n  case 'edit':\n  case 'delete':\n  case 'enable':\n  case 'disable':\n    if (!formData.categoryId) {\n      result.errors.push({ field: 'categoryId', message: 'Category ID required for this action' });\n    } else {\n      const exists = config.categories.some(c => c.id === formData.categoryId);\n      if (!exists) {\n        result.errors.push({ field: 'categoryId', message: `Category '${formData.categoryId}' not found` });\n      }\n      if (action === 'delete') {\n        result.warnings.push({ field: 'categoryId', message: 'This will permanently delete the category from config' });\n      }\n    }\n    break;\n\n  case 'reorder':\n    if (!formData.rotationOrder) {\n      result.errors.push({ field: 'rotationOrder', message: 'Rotation order required (comma-separated IDs)' });\n    } else {\n      const ids = formData.rotationOrder.split(',').map(s => s.trim()).filter(Boolean);\n      for (const id of ids) {\n        if (!config.categories.some(c => c.id === id)) {\n          result.errors.push({ field: 'rotationOrder', message: `Category '${id}' not found in config` });\n        }\n      }\n    }\n    break;\n\n  case 'view':\n    break;\n}\n\nreturn result;"
+      }
+    },
+    {
+      "id": "has-errors",
+      "name": "Has Errors?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "has-errors",
+              "leftValue": "={{ $('Detect Action').first().json.errors.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "show-errors",
+      "name": "Show Errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1420, 200],
+      "parameters": {
+        "jsCode": "const result = $('Detect Action').first().json;\nconst errors = result.errors || [];\nconst warnings = result.warnings || [];\n\nconst errorList = errors.map(e => `- **${e.field}**: ${e.message}`).join('\\n');\nconst warningList = warnings.map(w => `- **${w.field}**: ${w.message}`).join('\\n');\n\nreturn {\n  json: {\n    status: 'error',\n    errors,\n    warnings,\n    message: `Validation failed:\\n\\n${errorList}\\n\\n${warningList ? 'Warnings:\\n' + warningList : ''}`\n  }\n};"
+      }
+    },
+    {
+      "id": "apply-changes",
+      "name": "Apply Changes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1420, 420],
+      "parameters": {
+        "jsCode": "const result = $('Detect Action').first().json;\nconst { action, confirmed, formData, config } = result;\n\nif (!confirmed) {\n  return { json: { status: 'preview', action, message: 'No changes made — confirmation was NO' } };\n}\n\n// Deep clone config\nconst newConfig = JSON.parse(JSON.stringify(config));\n\nswitch (action) {\n  case 'add': {\n    const newCategory = {\n      id: formData.categoryId,\n      name: formData.categoryName || formData.categoryId,\n      type: formData.categoryType || 'standard',\n      enabled: true,\n      gdriveFolders: [{\n        id: formData.gdriveFolderId,\n        name: formData.gdriveFolderName || formData.categoryId\n      }],\n      collection: formData.collection || '',\n      audience: formData.audience || 'paid',\n      alwaysMembers: formData.alwaysMembers || false,\n      price: parseInt(formData.price) || 10,\n      captionSuffix: formData.captionSuffix || '',\n      captions: formData.captions ? formData.captions.split('\\n').map(s => s.trim()).filter(Boolean) : [],\n      aiTranslate: formData.aiTranslate || false,\n      aiPrompt: formData.aiPrompt || ''\n    };\n\n    if (newCategory.type === 'adult') {\n      newCategory.subTypes = [{\n        id: formData.categoryId + '_sub',\n        name: newCategory.name,\n        enabled: true,\n        gdriveFolders: newCategory.gdriveFolders,\n        collection: newCategory.collection,\n        price: newCategory.price,\n        aiTranslate: newCategory.aiTranslate\n      }];\n      // Override for adult\n      newCategory.alwaysMembers = true;\n    }\n\n    newConfig.categories.push(newCategory);\n\n    // Add to rotation order if not present\n    if (!newConfig.rotation.order.includes(newCategory.id)) {\n      newConfig.rotation.order.push(newCategory.id);\n    }\n    break;\n  }\n\n  case 'edit': {\n    const idx = newConfig.categories.findIndex(c => c.id === formData.categoryId);\n    if (idx >= 0) {\n      const cat = newConfig.categories[idx];\n      if (formData.categoryName) cat.name = formData.categoryName;\n      if (formData.collection !== undefined) cat.collection = formData.collection;\n      if (formData.audience) cat.audience = formData.audience;\n      if (formData.alwaysMembers !== undefined) cat.alwaysMembers = formData.alwaysMembers;\n      if (formData.price) cat.price = parseInt(formData.price);\n      if (formData.captionSuffix !== undefined) cat.captionSuffix = formData.captionSuffix;\n      if (formData.captions) {\n        cat.captions = formData.captions.split('\\n').map(s => s.trim()).filter(Boolean);\n      }\n      if (formData.aiTranslate !== undefined) cat.aiTranslate = formData.aiTranslate;\n      if (formData.aiPrompt !== undefined) cat.aiPrompt = formData.aiPrompt;\n      if (formData.gdriveFolderId) {\n        cat.gdriveFolders = cat.gdriveFolders || [];\n        cat.gdriveFolders.push({\n          id: formData.gdriveFolderId,\n          name: formData.gdriveFolderName || formData.gdriveFolderId\n        });\n      }\n    }\n    break;\n  }\n\n  case 'delete': {\n    newConfig.categories = newConfig.categories.filter(c => c.id !== formData.categoryId);\n    newConfig.rotation.order = newConfig.rotation.order.filter(id => id !== formData.categoryId);\n    break;\n  }\n\n  case 'enable': {\n    const cat = newConfig.categories.find(c => c.id === formData.categoryId);\n    if (cat) cat.enabled = true;\n    break;\n  }\n\n  case 'disable': {\n    const cat = newConfig.categories.find(c => c.id === formData.categoryId);\n    if (cat) cat.enabled = false;\n    break;\n  }\n\n  case 'reorder': {\n    newConfig.rotation.order = formData.rotationOrder\n      .split(',')\n      .map(s => s.trim())\n      .filter(Boolean)\n      .filter(id => newConfig.categories.some(c => c.id === id));\n    break;\n  }\n}\n\n// Ensure version\nnewConfig.version = 3;\nnewConfig.rotation = newConfig.rotation || { enabled: true, order: [], adultSubRotation: ['hentai', 'japanese', 'amerika'] };\nnewConfig.rotation.adultSubRotation = newConfig.rotation.adultSubRotation || ['hentai', 'japanese', 'amerika'];\n\nreturn {\n  json: {\n    status: 'modified',\n    action,\n    newConfig,\n    categoryCount: newConfig.categories.length\n  }\n};"
+      }
+    },
+    {
+      "id": "preview-config",
+      "name": "Preview JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 420],
+      "parameters": {
+        "jsCode": "const result = $('Apply Changes').first().json;\nconst pretty = JSON.stringify(result.newConfig, null, 2);\n\nreturn {\n  json: {\n    status: result.status,\n    action: result.action,\n    categoryCount: result.categoryCount,\n    preview: pretty.slice(0, 500) + (pretty.length > 500 ? '...' : ''),\n    fullJson: pretty,\n    message: result.status === 'preview'\n      ? 'Preview only — no changes saved. Set \"Confirm Action\" to \"Yes\" to save.'\n      : `Config modified: ${result.action}. Categories: ${result.categoryCount}.`\n  }\n};"
+      }
+    },
+    {
+      "id": "user-confirmed",
+      "name": "User Confirmed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1860, 420],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "confirmed",
+              "leftValue": "={{ $('Detect Action').first().json.confirmed }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "upload-config",
+      "name": "Upload Config",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [2080, 420],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "upload",
+        "fileName": "config.json",
+        "remotePath": "={{ $vars.VPS_UPLOAD_DIR }}/config.json",
+        "options": { "appendFile": false }
+      }
+    },
+    {
+      "id": "upload-config-code",
+      "name": "Prepare Config Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1860, 620],
+      "parameters": {
+        "jsCode": "const result = $('Apply Changes').first().json;\nconst pretty = JSON.stringify(result.newConfig, null, 2);\n\nreturn {\n  json: {\n    json: result.newConfig,\n    fileName: 'config.json',\n    remotePath: `${$vars.VPS_UPLOAD_DIR}/config.json`\n  }\n};"
+      }
+    },
+    {
+      "id": "verify-upload",
+      "name": "Verify Upload",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [2300, 420],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "download",
+        "filePath": "={{ $vars.VPS_UPLOAD_DIR }}/config.json"
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "notify-success",
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 2,
+      "position": [2520, 420],
+      "credentials": {
+        "emailHtml2": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Email SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "toEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "subject": "=✅ TEVI Config Updated — {{ $('Apply Changes').first().json.action }}",
+        "text": "={{ 'Action: ' + $('Apply Changes').first().json.action + '\\nCategories: ' + $('Apply Changes').first().json.categoryCount + '\\nTime: ' + new Date().toISOString() }}"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[
+        { "node": "Download Config", "type": "main", "index": 0 }
+      ]]
+    },
+    "Download Config": {
+      "main": [[
+        { "node": "Parse Config", "type": "main", "index": 0 }
+      ]]
+    },
+    "Parse Config": {
+      "main": [[
+        { "node": "Config Form", "type": "main", "index": 0 }
+      ]]
+    },
+    "Config Form": {
+      "main": [[
+        { "node": "Detect Action", "type": "main", "index": 0 }
+      ]]
+    },
+    "Detect Action": {
+      "main": [[
+        { "node": "Has Errors?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Has Errors?": {
+      "true": [[
+        { "node": "Show Errors", "type": "main", "index": 0 }
+      ]],
+      "false": [[
+        { "node": "Apply Changes", "type": "main", "index": 0 }
+      ]]
+    },
+    "Apply Changes": {
+      "main": [[
+        { "node": "Preview JSON", "type": "main", "index": 0 }
+      ]]
+    },
+    "Preview JSON": {
+      "main": [[
+        { "node": "User Confirmed?", "type": "main", "index": 0 }
+      ]]
+    },
+    "User Confirmed?": {
+      "true": [[
+        { "node": "Prepare Config Upload", "type": "main", "index": 0 }
+      ]],
+      "false": [[
+        { "node": "Prepare Config Upload", "type": "main", "index": 0 }
+      ]]
+    },
+    "Prepare Config Upload": {
+      "main": [[
+        { "node": "Upload Config", "type": "main", "index": 0 }
+      ]]
+    },
+    "Upload Config": {
+      "main": [[
+        { "node": "Verify Upload", "type": "main", "index": 0 },
+        { "node": "Notify Success", "type": "main", "index": 0 }
+      ]]
+    },
+    "Show Errors": {
+      "main": [[]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "timezone": "Asia/Jakarta"
+  },
+  "tags": ["tevi", "config"]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "tevi-upload",
+  "version": "3.1.0",
+  "description": "Automated content uploader for TEVI.com using N8N + VPS + Playwright",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "echo \"No tests configured\" && exit 0"
+  },
+  "keywords": ["tevi", "automation", "n8n", "playwright", "upload"],
+  "author": "Devata",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.40.0",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

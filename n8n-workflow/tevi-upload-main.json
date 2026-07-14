@@ -1,0 +1,792 @@
+{
+  "name": "TEVI Upload — Main",
+  "nodes": [
+    {
+      "id": "trigger-schedule",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [100, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "={{ $vars.CRON_SCHEDULE || '0 * * * *' }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "download-state",
+      "name": "Download State",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [320, 300],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "download",
+        "filePath": "={{ $vars.VPS_UPLOAD_DIR }}/state.json"
+      }
+    },
+    {
+      "id": "read-config",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [320, 480],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "download",
+        "filePath": "={{ $vars.VPS_UPLOAD_DIR }}/config.json"
+      }
+    },
+    {
+      "id": "validate-version",
+      "name": "Validate Version",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [540, 390],
+      "parameters": {
+        "jsCode": "const config = $('Read Config').first().json;\n\nif (!config.version || config.version !== 3) {\n  throw new Error('CONFIG_VERSION_MISMATCH: Expected version 3, got ' + config.version);\n}\n\nif (!Array.isArray(config.categories) || config.categories.length === 0) {\n  throw new Error('NO_CATEGORIES: config.json has no categories');\n}\n\nconst enabled = config.categories.filter(c => c.enabled);\nif (enabled.length === 0) {\n  throw new Error('NO_CATEGORY_ENABLED: All categories are disabled');\n}\n\nreturn { json: { valid: true, categoryCount: config.categories.length, enabledCount: enabled.length } };"
+      }
+    },
+    {
+      "id": "calculate-rotation",
+      "name": "Calculate Rotation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 390],
+      "parameters": {
+        "jsCode": "const config = $('Read Config').first().json;\nconst stateRaw = $('Download State').first().json;\n\n// Parse state if it's a string\nlet state = stateRaw;\nif (typeof stateRaw === 'string') {\n  try { state = JSON.parse(stateRaw); } catch {\n    state = { cycleIndex: 0, adultSubCycleIndex: 0, categorySkipCount: {}, lastRun: null };\n  }\n}\n\n// Get enabled categories in rotation order\nconst enabledCategories = (config.rotation.order || [])\n  .map(id => config.categories.find(c => c.id === id))\n  .filter(c => c && c.enabled);\n\nif (enabledCategories.length === 0) {\n  throw new Error('NO_CATEGORY_ENABLED');\n}\n\n// Index-based rotation (NOT modulo on filtered array)\nconst nextIndex = (state.cycleIndex + 1) % enabledCategories.length;\nconst category = enabledCategories[nextIndex];\n\nconst result = {\n  selectedCategoryId: category.id,\n  selectedCategory: category,\n  nextCycleIndex: nextIndex,\n  stateUpdates: {\n    cycleIndex: nextIndex,\n    lastRun: new Date().toISOString()\n  }\n};\n\n// Adult sub-rotation\nif (category.type === 'adult') {\n  const enabledSubTypes = (category.subTypes || []).filter(st => st.enabled);\n  if (enabledSubTypes.length > 0) {\n    const subIndex = (state.adultSubCycleIndex || 0) % enabledSubTypes.length;\n    result.selectedSubType = enabledSubTypes[subIndex];\n    result.stateUpdates.adultSubCycleIndex = (state.adultSubCycleIndex + 1) % enabledSubTypes.length;\n  } else {\n    result.selectedSubType = null;\n  }\n} else {\n  result.selectedSubType = null;\n}\n\n// Skip threshold check\nconst skipCount = (state.categorySkipCount || {})[category.id] || 0;\nresult.categorySkipCount = skipCount;\nresult.shouldSkip = skipCount >= 3;\n\nreturn result;"
+      }
+    },
+    {
+      "id": "check-no-category",
+      "name": "No Category Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [980, 390],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "no-category",
+              "leftValue": "={{ $json.shouldSkip }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "acquire-lock",
+      "name": "Acquire Lock",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [1200, 300],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "rename",
+        "fromPath": "={{ $vars.VPS_UPLOAD_DIR }}/state.json",
+        "toPath": "={{ $vars.VPS_UPLOAD_DIR }}/state.json.lock"
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "lock-failed-check",
+      "name": "Lock Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1420, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "lock-failed",
+              "leftValue": "={{ $json.error }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "exists" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "save-state",
+      "name": "Save State",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [1420, 480],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "upload",
+        "fileName": "state.json",
+        "remotePath": "={{ $vars.VPS_UPLOAD_DIR }}/state.json",
+        "options": { "appendFile": false }
+      }
+    },
+    {
+      "id": "build-rotation-state",
+      "name": "Build Rotation State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 480],
+      "parameters": {
+        "jsCode": "const rotation = $('Calculate Rotation').first().json;\nconst stateRaw = $('Download State').first().json;\n\nlet state = stateRaw;\nif (typeof stateRaw === 'string') {\n  try { state = JSON.parse(stateRaw); } catch {\n    state = { cycleIndex: 0, adultSubCycleIndex: 0, categorySkipCount: {}, lastRun: null };\n  }\n}\n\n// Merge categorySkipCount — reset selected category on successful run\nconst newSkipCount = { ...(state.categorySkipCount || {}) };\nnewSkipCount[rotation.selectedCategoryId] = 0;\n\nconst newState = {\n  cycleIndex: rotation.nextCycleIndex,\n  adultSubCycleIndex: rotation.stateUpdates.adultSubCycleIndex ?? state.adultSubCycleIndex ?? 0,\n  categorySkipCount: newSkipCount,\n  lastRun: new Date().toISOString()\n};\n\nreturn { json: newState };"
+      }
+    },
+    {
+      "id": "gdrivelist-hentai",
+      "name": "List GDrive — Hentai",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2.2,
+      "position": [1640, 180],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Google Drive"
+        }
+      },
+      "parameters": {
+        "operation": "list",
+        "limit": 100,
+        "parentFolder": "={{ $('Calculate Rotation').first().json.selectedSubType?.gdriveFolders?.[0]?.id }}"
+      },
+      "disabled": true
+    },
+    {
+      "id": "gdrivelist-japanese",
+      "name": "List GDrive — Japanese",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2.2,
+      "position": [1640, 340],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Google Drive"
+        }
+      },
+      "parameters": {
+        "operation": "list",
+        "limit": 100,
+        "parentFolder": "={{ $('Calculate Rotation').first().json.selectedCategory?.gdriveFolders?.[0]?.id }}"
+      },
+      "disabled": true
+    },
+    {
+      "id": "gdrivelist-main",
+      "name": "List GDrive Files",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2.2,
+      "position": [1640, 500],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Google Drive"
+        }
+      },
+      "parameters": {
+        "operation": "list",
+        "limit": 100,
+        "parentFolder": "={{ $('Calculate Rotation').first().json.selectedCategory?.gdriveFolders?.[0]?.id }}"
+      }
+    },
+    {
+      "id": "files-found-check",
+      "name": "Files Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1860, 500],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "no-files",
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "random-pick",
+      "name": "Random Pick",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2080, 500],
+      "parameters": {
+        "jsCode": "const files = $input.all();\nif (!files || files.length === 0) {\n  throw new Error('NO_FILES');\n}\n\nconst randomIndex = Math.floor(Math.random() * files.length);\nconst selected = files[randomIndex].json;\n\n// Track folder source\nconst folderId = selected.selectedFolderId || selected.parents?.[0] || '';\n\nreturn {\n  json: {\n    ...selected,\n    selectedFolderId: folderId,\n    fileName: selected.name || selected.title,\n    gdriveFileId: selected.id,\n    gdriveMimeType: selected.mimeType,\n    gdriveSize: selected.size,\n    _source: 'gdrive'\n  }\n};"
+      }
+    },
+    {
+      "id": "download-file",
+      "name": "Download File",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2.2,
+      "position": [2300, 500],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Google Drive"
+        }
+      },
+      "parameters": {
+        "operation": "download",
+        "fileId": "={{ $json.gdriveFileId }}"
+      }
+    },
+    {
+      "id": "sftp-upload",
+      "name": "SFTP Upload",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [2520, 500],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "upload",
+        "fileName": "={{ $json.fileName }}",
+        "remotePath": "={{ $vars.VPS_UPLOAD_DIR }}/{{ $json.fileName }}",
+        "options": { "appendFile": false },
+        "binaryData": true,
+        "inputBinaryFieldName": "data"
+      }
+    },
+    {
+      "id": "build-payload",
+      "name": "Build Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2740, 500],
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst rotation = $('Calculate Rotation').first().json;\nconst category = rotation.selectedCategory;\nconst subType = rotation.selectedSubType;\nconst tevi = $credentials['TEVI Account'];\nconst config = $('Read Config').first().json;\n\n// Resolve effective config (sub-type overrides parent)\nconst effective = {\n  collection: subType?.collection || category.collection || '',\n  audiencePaid: category.audience === 'paid',\n  audienceFree: category.audience === 'free',\n  audiencePrice: subType?.price || category.price || 10,\n  audienceMembership: category.type === 'adult',\n  alwaysMembers: category.type === 'adult',\n  nsfw: category.type === 'adult',\n  type: category.id,\n  sourceFolderId: item.selectedFolderId\n};\n\n// Build archive name\nconst now = new Date();\nconst ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);\nconst base = (item.fileName || '').replace(/\\.[^.]+$/, '');\nconst ext = (item.fileName || '').split('.').pop();\nconst archiveName = `${base}_${effective.type}_${ts}.${ext}`;\n\nconst payload = {\n  email: tevi.email,\n  password: tevi.password,\n  filePath: `${$vars.VPS_UPLOAD_DIR}/${item.fileName}`,\n  caption: item.caption || '',\n  collection: effective.collection,\n  audienceFree: effective.audienceFree,\n  audiencePaid: effective.audiencePaid,\n  audiencePrice: effective.audiencePrice,\n  audienceMembership: effective.audienceMembership,\n  alwaysMembers: effective.alwaysMembers,\n  nsfw: effective.nsfw,\n  type: effective.type,\n  sourceFolderId: effective.sourceFolderId,\n  fileName: item.fileName,\n  archiveName,\n  gdriveFileId: item.gdriveFileId,\n  selectedFolderId: item.selectedFolderId,\n  selectedCategoryId: category.id,\n  selectedSubTypeId: subType?.id || null\n};\n\nreturn { json: payload };"
+      }
+    },
+    {
+      "id": "ai-caption-check",
+      "name": "AI Caption?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2960, 500],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "use-ai",
+              "leftValue": "={{ $('Calculate Rotation').first().json.selectedCategory.aiTranslate || $('Calculate Rotation').first().json.selectedSubType?.aiTranslate || false }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "generate-ai-caption",
+      "name": "Generate AI Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3180, 420],
+      "parameters": {
+        "jsCode": "// AI Caption Generator — 5-layer pipeline\nconst item = $input.first().json;\nconst rotation = $('Calculate Rotation').first().json;\nconst category = rotation.selectedCategory;\nconst subType = rotation.selectedSubType;\nconst captionSuffix = category.captionSuffix || '';\n\nconst filename = item.fileName || '';\nconst folderId = item.selectedFolderId || '';\nconst type = category.id;\nconst subTypeId = subType?.id || null;\n\n// Read AI settings from N8N Variables\nconst aiEndpoint = $vars.AI_ENDPOINT || 'https://gateway.olagon.site/anthropic/v1/messages';\nconst aiModel = $vars.AI_MODEL || 'claude-sonnet-4-6';\nconst aiMaxTokens = parseInt($vars.AI_MAX_TOKENS) || 200;\nconst aiRetries = parseInt($vars.AI_RETRY_ATTEMPTS) || 3;\nconst aiCacheTTL = parseInt($vars.AI_CACHE_TTL_HOURS) || 24;\nconst prompt = subType?.aiPrompt || category.aiPrompt || 'Translate to Bahasa Indonesia. Short, natural, max 10 words. No emojis.';\n\n// ── Layer 1: Indonesian word replacement ──────────────────────\nconst INDONESIAN_MAP = {\n  'masturbate': 'colmek', 'masturbation': 'colmek', 'masturbating': 'colmek',\n  'breasts': 'dada', 'breast': 'dada', 'tits': 'dada', 'titties': 'dada',\n  'sex': 'seks', 'sexual': 'seks',\n  'dick': 'kontol', 'dicks': 'kontol', 'penis': 'kontol',\n  'fuck': 'main', 'fucked': 'main', 'fucking': 'main',\n  'teen': 'remaja', 'teens': 'remaja', 'teenage': 'remaja',\n  'naked': 'telanjang', 'nude': 'telanjang',\n  'big': 'besar', 'huge': 'besar',\n  'ass': 'bokong', 'asses': 'bokong',\n  'rough': 'main', 'hardcore': 'main', 'extreme': 'main',\n  'group': 'grup',\n  'outdoor': 'luar ruangan', 'public': 'publik',\n  'stepmom': 'ibu tiri', 'stepmother': 'ibu tiri',\n  'pussy': 'memek',\n  'cheating': 'selingkuh', 'married': 'menikah',\n  'doctor': 'dokter', 'nurse': 'perawat', 'maid': 'pramugari',\n  'cosplay': 'cosplay', 'cosplayer': 'cosplayer',\n  'idol': 'idol', 'jav': 'jav',\n};\n\nfunction cleanFilename(name) {\n  return (name || '')\n    .replace(/\\.[^.]+$/, '')\n    .replace(/[\\[\\]]/g, '')\n    .replace(/[_\\-]+/g, ' ')\n    .replace(/\\b(uncen|nekop|care|xnxx|xvideos|hd|sd|720p|1080p|480p|360p|mp4|mkv|avi|mov|webm|m4v|bluray|discontinued|censored)\\b/gi, '')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction replaceIndonesian(text) {\n  for (const [eng, indo] of Object.entries(INDONESIAN_MAP)) {\n    const re = new RegExp(`\\\\b${eng}\\\\b`, 'gi');\n    text = text.replace(re, indo);\n  }\n  return text;\n}\n\n// ── Layer 3: Adult word injection ─────────────────────────────\nconst ADULT_INJECTION = [\n  [/\\bmasturbat\\w*/gi, 'colmek'],\n  [/\\btits?\\b/gi, 'dada'],\n  [/\\bbreasts?\\b/gi, 'dada'],\n  [/\\bass(es)?\\b/gi, 'bokong'],\n  [/\\bsex\\b/gi, 'seks'],\n  [/\\bdick\\b/gi, 'kontol'],\n  [/\\bpussy\\b/gi, 'memek'],\n  [/\\bteen\\b/gi, 'remaja'],\n  [/\\bnaked\\b/gi, 'telanjang'],\n  [/\\bbig\\b/gi, 'besar'],\n  [/\\bhuge\\b/gi, 'besar'],\n  [/\\brough\\b/gi, 'main'],\n  [/\\bhardcore\\b/gi, 'main'],\n  [/\\bgroup\\b/gi, 'grup'],\n];\n\nfunction injectAdultWords(translated, original) {\n  let result = translated;\n  for (const [pattern, replacement] of ADULT_INJECTION) {\n    if (pattern.test(original) && !pattern.test(result)) {\n      result = result.replace(pattern, replacement);\n    }\n  }\n  return result;\n}\n\n// ── Layer 2: AI Translation ───────────────────────────────────\nasync function aiTranslate(text) {\n  const keys = $credentials['AI Service']?.keys || [];\n  if (!keys || keys.length === 0) return null;\n\n  for (let attempt = 0; attempt < aiRetries; attempt++) {\n    const apiKey = keys[attempt % keys.length];\n    try {\n      const response = await fetch(aiEndpoint, {\n        method: 'POST',\n        headers: {\n          'x-api-key': apiKey,\n          'content-type': 'application/json',\n          'anthropic-version': '2023-06-01'\n        },\n        body: JSON.stringify({\n          model: aiModel,\n          max_tokens: aiMaxTokens,\n          messages: [{ role: 'user', content: `${prompt}\\n\"${text}\"` }]\n        })\n      });\n\n      if (!response.ok) continue;\n\n      const json = await response.json();\n      const blocks = json.content || [];\n      const textBlock = blocks.find(b => b.type === 'text')?.text || '';\n      const thinking = blocks.find(b => b.type === 'thinking')?.thinking || '';\n\n      for (const source of [textBlock, thinking]) {\n        const extracted = extractTranslation(source);\n        if (extracted) return extracted;\n      }\n    } catch {}\n  }\n  return null;\n}\n\nfunction extractTranslation(text) {\n  if (!text) return null;\n  const clean = text.replace(/[*_`#]/g, '').trim();\n\n  // Strategy 1: Quoted string\n  const quotes = [...clean.matchAll(/\"([A-Za-z0-9\\sÀ-ɏḀ-ỿ一-鿿]{3,65})\"/g)];\n  if (quotes.length > 0) {\n    const last = quotes[quotes.length - 1][1].trim();\n    if (!/translate|should|short|natural|under|within|max|word|keep|help|adult|declin/i.test(last)) {\n      return last;\n    }\n  }\n\n  // Strategy 2: Bullet points\n  const bullets = [...clean.matchAll(/^[\\-\\*]\\s+(.+)$/gm)];\n  if (bullets.length > 0) {\n    const last = bullets[bullets.length - 1][1].trim();\n    if (!/^the|^and|^jav\\s*=|means|translate|refer|adult|porn|genre|search/i.test(last)) {\n      return last;\n    }\n  }\n\n  // Strategy 3: Final answer\n  const final = clean.match(/(?:final answer|translation is|here(?:'s| is) the)[\\s: ]+\"?(.+?)\"?\\s*$/im);\n  if (final) {\n    const c = final[1].trim();\n    if (!/translate|should|declin/i.test(c) && c.length > 3) return c;\n  }\n\n  // Strategy 4: Indonesian sentences\n  const sentences = clean.split(/[.\\n]/).map(s => s.trim()).filter(s => s.length > 4 && s.length < 70);\n  const ID_KNOWN = /^(javan|idol|jav|cosplay|maid|onsen|kompilasi|video|dewasa|cewek|gadis|perawat|seksi|seragam|bokong|pantat|dada|kontol|vital|colmek|masturbasi|anal|seks|main|grup|publik|remaja|muda|telanjang|intim|vaginal|orgasme|memek|besar|kecil|luar|dalam|ranjang|kamar|pakai|sendiri|seksi|pantai|liburan|ibu|tiri|anak|hukuman|disiplin|terlarang|daging|wanita|menikah|selingkuh|koleksi|adegan|dokter|medis|konten|bugil|porno|oil|massage|hot)$/i;\n\n  for (let i = sentences.length - 1; i >= 0; i--) {\n    const s = sentences[i];\n    if (/^(the|and|but|so|however|actually|let me|this|user|looking|need|for translation|keeping|short|natural|under|within|max|word|keep|help|legitimate|abbreviation|genre|type|category|search|term|adult|explicit|pornograph)/i.test(s)) continue;\n    const words = s.split(/\\s+/);\n    const englishOnly = words.filter(w => /^[A-Za-z]{4,}$/.test(w) && !ID_KNOWN.test(w));\n    if (englishOnly.length > words.length * 0.6) continue;\n    const c = s.replace(/^[\"'\\-*>`\\s]+/, '').replace(/[\"'\\s]+$/, '').trim();\n    if (c.length > 3) return c;\n  }\n\n  return null;\n}\n\nfunction buildCaption(translated, type, subTypeId, suffix) {\n  const formattedSuffix = suffix ? `\\n\\n${suffix}` : '';\n  if (type === 'adult') {\n    switch (subTypeId) {\n      case 'japanese': return `(JAV) ${translated}${formattedSuffix}`;\n      case 'amerika':  return `[Amerika] ${translated}${formattedSuffix}`;\n      default:         return `${translated}${formattedSuffix}`;\n    }\n  }\n  return `${translated}${formattedSuffix}`;\n}\n\n// ── Main execution ────────────────────────────────────────────\nconst cleaned = cleanFilename(filename);\nconst indoVersion = replaceIndonesian(cleaned);\n\nlet translated = await aiTranslate(indoVersion);\nif (!translated) translated = await aiTranslate(cleaned);\n\nif (!translated) {\n  translated = `${subTypeId || type} Video Dewasa ${indoVersion}`;\n}\n\ntranslated = injectAdultWords(translated, cleaned);\nconst finalCaption = buildCaption(translated, type, subTypeId, captionSuffix);\n\nreturn {\n  json: {\n    caption: finalCaption,\n    usedAi: true,\n    usedCache: false,\n    filename,\n    folderId\n  }\n};"
+      }
+    },
+    {
+      "id": "random-caption",
+      "name": "Pick Random Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3180, 620],
+      "parameters": {
+        "jsCode": "const rotation = $('Calculate Rotation').first().json;\nconst category = rotation.selectedCategory;\nconst captions = category.captions || ['Content'];\nconst randomCaption = captions[Math.floor(Math.random() * captions.length)];\nconst suffix = category.captionSuffix || '';\n\nreturn {\n  json: {\n    caption: `${randomCaption}\\n\\n${suffix}`.trim(),\n    usedAi: false,\n    usedCache: false,\n    filename: $input.first().json.fileName,\n    folderId: $input.first().json.selectedFolderId\n  }\n};"
+      }
+    },
+    {
+      "id": "apply-index",
+      "name": "Apply Index",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3400, 500],
+      "parameters": {
+        "jsCode": "const payload = $('Build Payload').first().json;\nconst captionData = $input.first().json;\n\n// Get folder-specific index\nconst config = $('Read Config').first().json;\nconst category = $('Calculate Rotation').first().json.selectedCategory;\nconst subType = $('Calculate Rotation').first().json.selectedSubType;\n\nconst folderId = payload.selectedFolderId;\nconst folderConfig = (subType?.gdriveFolders || category.gdriveFolders || [])\n  .find(f => f.id === folderId);\n\nconst indexStart = folderConfig?.indexStart || 1;\n// Use current timestamp as a simple incrementing index\nconst n = indexStart + Math.floor(Date.now() / 1000) % 1000;\n\nconst caption = (captionData.caption || '').replace(/\\{n\\}/g, n);\n\nreturn {\n  json: {\n    ...payload,\n    caption\n  }\n};"
+      }
+    },
+    {
+      "id": "upload-to-vps",
+      "name": "Upload to VPS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [3620, 500],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.VPS_UPLOAD_URL }}/upload",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 600000,
+          "maxRetries": 2,
+          "retryWait": 5000
+        }
+      }
+    },
+    {
+      "id": "upload-success-check",
+      "name": "Upload Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3840, 500],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "archive-file",
+      "name": "Archive File",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [4060, 420],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "rename",
+        "fromPath": "={{ $vars.VPS_UPLOAD_DIR }}/{{ $json.fileName }}",
+        "toPath": "={{ $vars.VPS_ARCHIVE_DIR }}/{{ $json.archiveName }}"
+      }
+    },
+    {
+      "id": "fifo-cleanup",
+      "name": "FIFO Cleanup",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [4280, 420],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "executeCommand",
+        "command": "={{ $vars.VPS_ARCHIVE_DIR }}"
+      }
+    },
+    {
+      "id": "fifo-cleanup-code",
+      "name": "FIFO Cleanup Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4500, 420],
+      "parameters": {
+        "jsCode": "// Build FIFO cleanup command\nconst archiveDir = $vars.VPS_ARCHIVE_DIR;\n// Keep 10 newest files, delete older ones\nconst cmd = `cd \"${archiveDir}\" && ls -t | grep -v '^\\.' | tail -n +11 | xargs -d '\\n' rm -f 2>/dev/null || true`;\nreturn { json: { command: cmd } };"
+      }
+    },
+    {
+      "id": "reset-skip-count",
+      "name": "Reset Skip Count",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4280, 260],
+      "parameters": {
+        "jsCode": "// This node runs on success path — skip count already reset in Build Rotation State\nreturn { json: { skipped: false, reason: 'upload_success' } };"
+      }
+    },
+    {
+      "id": "notify-success",
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 2,
+      "position": [4720, 420],
+      "credentials": {
+        "emailHtml2": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Email SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "toEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "subject": "=✅ TEVI Upload Success — {{ $('Build Payload').first().json.fileName }}",
+        "text": "={{ 'File: ' + $('Build Payload').first().json.fileName + '\\nCategory: ' + $('Build Payload').first().json.type + '\\nURL: ' + $input.first().json.url + '\\nTime: ' + new Date().toISOString() }}"
+      }
+    },
+    {
+      "id": "release-lock",
+      "name": "Release Lock",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [4940, 420],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "delete",
+        "filePath": "={{ $vars.VPS_LOCK_FILE }}"
+      }
+    },
+    {
+      "id": "notify-skip",
+      "name": "Notify Skip",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 2,
+      "position": [4720, 260],
+      "credentials": {
+        "emailHtml2": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Email SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "toEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "subject": "=⚠️ TEVI Upload Skipped — No files in folder",
+        "text": "={{ 'Category: ' + $('Calculate Rotation').first().json.selectedCategoryId + '\\nReason: Folder empty or disabled\\nTime: ' + new Date().toISOString() }}"
+      }
+    },
+    {
+      "id": "increment-skip",
+      "name": "Increment Skip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4940, 260],
+      "parameters": {
+        "jsCode": "// Update state to increment skip count\nconst rotation = $('Calculate Rotation').first().json;\nconst stateRaw = $('Download State').first().json;\n\nlet state = stateRaw;\nif (typeof stateRaw === 'string') {\n  try { state = JSON.parse(stateRaw); } catch {\n    state = { cycleIndex: 0, adultSubCycleIndex: 0, categorySkipCount: {}, lastRun: null };\n  }\n}\n\nconst skipCount = (state.categorySkipCount || {});\nskipCount[rotation.selectedCategoryId] = (skipCount[rotation.selectedCategoryId] || 0) + 1;\n\nconst newState = {\n  ...state,\n  cycleIndex: rotation.nextCycleIndex,\n  categorySkipCount: skipCount,\n  lastRun: new Date().toISOString()\n};\n\nreturn { json: newState };"
+      }
+    },
+    {
+      "id": "release-lock-skip",
+      "name": "Release Lock (Skip)",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [5160, 260],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "delete",
+        "filePath": "={{ $vars.VPS_LOCK_FILE }}"
+      }
+    },
+    {
+      "id": "notify-lock-failed",
+      "name": "Notify Lock Failed",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 2,
+      "position": [1640, 140],
+      "credentials": {
+        "emailHtml2": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Email SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "toEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "subject": "=🔒 TEVI Upload — Lock Failed (another run in progress)",
+        "text": "=Another workflow instance is running. This run stopped."
+      }
+    },
+    {
+      "id": "notify-no-category",
+      "name": "Notify No Category",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 2,
+      "position": [1200, 140],
+      "credentials": {
+        "emailHtml2": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Email SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "toEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "subject": "=⚠️ TEVI Upload — No Category Enabled",
+        "text": "=All categories are disabled or no categories configured. Workflow stopped."
+      }
+    },
+    {
+      "id": "notify-failure",
+      "name": "Notify Failure",
+      "type": "n8n-nodes-base.email",
+      "typeVersion": 2,
+      "position": [4720, 620],
+      "credentials": {
+        "emailHtml2": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "Email SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "toEmail": "={{ $vars.NOTIFY_EMAIL }}",
+        "subject": "=❌ TEVI Upload Failed — {{ $('Build Payload').first().json.fileName }}",
+        "text": "={{ 'File: ' + $('Build Payload').first().json.fileName + '\\nCategory: ' + $('Build Payload').first().json.type + '\\nError: ' + $input.first().json.reason + '\\nDetail: ' + $input.first().json.detail + '\\nTime: ' + new Date().toISOString() }}"
+      }
+    },
+    {
+      "id": "release-lock-error",
+      "name": "Release Lock (Error)",
+      "type": "n8n-nodes-base.sftp",
+      "typeVersion": 1.2,
+      "position": [4940, 620],
+      "credentials": {
+        "sshSftpApi": {
+          "__rl": true,
+          "__cc": 1,
+          "__cn": "VPS SSH/SFTP"
+        }
+      },
+      "parameters": {
+        "operation": "delete",
+        "filePath": "={{ $vars.VPS_LOCK_FILE }}"
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [[
+        { "node": "Download State", "type": "main", "index": 0 },
+        { "node": "Read Config", "type": "main", "index": 0 }
+      ]]
+    },
+    "Download State": {
+      "main": [[
+        { "node": "Validate Version", "type": "main", "index": 0 }
+      ]]
+    },
+    "Read Config": {
+      "main": [[
+        { "node": "Validate Version", "type": "main", "index": 0 }
+      ]]
+    },
+    "Validate Version": {
+      "main": [[
+        { "node": "Calculate Rotation", "type": "main", "index": 0 }
+      ]]
+    },
+    "Calculate Rotation": {
+      "main": [[
+        { "node": "Check No Category Enabled?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Check No Category Enabled?": {
+      "main": [[
+        { "node": "Acquire Lock", "type": "main", "index": 0 }
+      ]],
+      "false": [[
+        { "node": "Notify No Category", "type": "main", "index": 0 }
+      ]]
+    },
+    "Acquire Lock": {
+      "main": [[
+        { "node": "Lock Failed?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Lock Failed?": {
+      "main": [[
+        { "node": "Save State", "type": "main", "index": 0 },
+        { "node": "Build Rotation State", "type": "main", "index": 0 }
+      ]],
+      "true": [[
+        { "node": "Notify Lock Failed", "type": "main", "index": 0 }
+      ]]
+    },
+    "Save State": {
+      "main": [[
+        { "node": "List GDrive Files", "type": "main", "index": 0 }
+      ]]
+    },
+    "Build Rotation State": {
+      "main": [[
+        { "node": "Save State", "type": "main", "index": 0 }
+      ]]
+    },
+    "List GDrive Files": {
+      "main": [[
+        { "node": "Files Found?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Files Found?": {
+      "main": [[
+        { "node": "Random Pick", "type": "main", "index": 0 }
+      ]],
+      "false": [[
+        { "node": "Increment Skip", "type": "main", "index": 0 },
+        { "node": "Notify Skip", "type": "main", "index": 0 }
+      ]]
+    },
+    "Random Pick": {
+      "main": [[
+        { "node": "Download File", "type": "main", "index": 0 }
+      ]]
+    },
+    "Download File": {
+      "main": [[
+        { "node": "SFTP Upload", "type": "main", "index": 0 }
+      ]]
+    },
+    "SFTP Upload": {
+      "main": [[
+        { "node": "Build Payload", "type": "main", "index": 0 }
+      ]]
+    },
+    "Build Payload": {
+      "main": [[
+        { "node": "AI Caption?", "type": "main", "index": 0 }
+      ]]
+    },
+    "AI Caption?": {
+      "main": [[
+        { "node": "Generate AI Caption", "type": "main", "index": 0 }
+      ]],
+      "false": [[
+        { "node": "Pick Random Caption", "type": "main", "index": 0 }
+      ]]
+    },
+    "Generate AI Caption": {
+      "main": [[
+        { "node": "Apply Index", "type": "main", "index": 0 }
+      ]]
+    },
+    "Pick Random Caption": {
+      "main": [[
+        { "node": "Apply Index", "type": "main", "index": 0 }
+      ]]
+    },
+    "Apply Index": {
+      "main": [[
+        { "node": "Upload to VPS", "type": "main", "index": 0 }
+      ]]
+    },
+    "Upload to VPS": {
+      "main": [[
+        { "node": "Upload Success?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Upload Success?": {
+      "main": [[
+        { "node": "Archive File", "type": "main", "index": 0 },
+        { "node": "FIFO Cleanup Code", "type": "main", "index": 0 },
+        { "node": "Notify Success", "type": "main", "index": 0 },
+        { "node": "Release Lock", "type": "main", "index": 0 }
+      ]],
+      "false": [[
+        { "node": "Notify Failure", "type": "main", "index": 0 },
+        { "node": "Release Lock (Error)", "type": "main", "index": 0 }
+      ]]
+    },
+    "Archive File": {
+      "main": [[
+        { "node": "Reset Skip Count", "type": "main", "index": 0 }
+      ]]
+    },
+    "FIFO Cleanup Code": {
+      "main": [[
+        { "node": "FIFO Cleanup", "type": "main", "index": 0 }
+      ]]
+    },
+    "Increment Skip": {
+      "main": [[
+        { "node": "Release Lock (Skip)", "type": "main", "index": 0 }
+      ]]
+    },
+    "Release Lock": {
+      "main": [[]]
+    },
+    "Release Lock (Skip)": {
+      "main": [[]]
+    },
+    "Release Lock (Error)": {
+      "main": [[]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "timezone": "Asia/Jakarta",
+    "errorWorkflow": ""
+  },
+  "tags": ["tevi", "automation", "upload"]
+}
