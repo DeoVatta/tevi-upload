@@ -4,16 +4,26 @@
 
 ## Status
 
-**PRD v2 is complete.** Implementation pending.
+**Implementation in progress.** See [phases.md](phases.md) for detailed build plan.
 
-See [PRD.md](PRD.md) for the complete technical specification.
+- [x] PRD v3 — Complete technical specification
+- [x] phases.md — Implementation guide (7 phases, ~17-25 hours)
+- [ ] Phase 0 — Prerequisites (VPS, N8N, GDrive setup)
+- [ ] Phase 1 — VPS Executor (server.js + PM2)
+- [ ] Phase 2 — Config System (config.json + state.json + Config Workflow)
+- [ ] Phase 3 — N8N Main Workflow (34 nodes)
+- [ ] Phase 4 — AI Caption System (5-layer pipeline)
+- [ ] Phase 5 — Testing (integration tests)
+- [ ] Phase 6 — Documentation (setup docs)
+- [ ] Phase 7 — Cleanup & Deploy (production ready)
 
 ## What's Here
 
 ```
 tevi-upload/
-├── PRD.md      ← Complete technical specification (v2)
+├── PRD.md      ← Complete technical specification (v3)
 ├── README.md   ← This file
+├── phases.md   ← Implementation phases guide
 ├── LICENSE     ← MIT License
 └── .gitignore
 ```
