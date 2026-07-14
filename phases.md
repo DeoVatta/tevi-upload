@@ -1,7 +1,19 @@
-# IMPLEMENTATION PHASES — TEVI Upload System v3
+# IMPLEMENTATION PHASES — TEVI Upload System v3.1
 
-> Detailed implementation guide for building the complete TEVI Upload System.
-> Follow phases in order. Each phase is independent and testable.
+> Detailed implementation guide. Read this file when building the system.
+> PRD.md is the technical specification. This file is the step-by-step execution plan.
+
+---
+
+## Audit Fixes Applied (v3.1)
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | 🔴 CRITICAL | AI endpoint + model in config.json | Moved to N8N Variables |
+| 2 | 🔴 CRITICAL | Hardcoded SFTP credentials in phases.md | Use `$credentials.VPS_SSH_SFTP` |
+| 3 | 🟡 HIGH | phases.md had inline SSH credentials example | Use credential reference pattern |
+| 4 | 🟡 MEDIUM | Config form complexity | Simplified with real-time validation feedback |
+| 5 | 🟡 MEDIUM | Cron schedule not configurable | Added `CRON_SCHEDULE` N8N Variable |
 
 ---
 
@@ -35,7 +47,7 @@ mkdir -p /home/vps-devata/tevi-uploads
 mkdir -p /home/vps-devata/tevi-uploads/archive
 mkdir -p /home/vps-devata/logs
 
-# Install Node.js 18+ (if not installed)
+# Install Node.js 18+
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
@@ -55,10 +67,8 @@ mkdir -p /home/vps-devata/tevi-uploads
 
 **Option B: Self-hosted N8N**
 ```bash
-# Install N8N
 npm install -g n8n
 n8n start
-
 # Or with Docker
 docker run -d --name n8n -p 5678:5678 n8nio/n8n
 ```
@@ -67,13 +77,12 @@ docker run -d --name n8n -p 5678:5678 n8nio/n8n
 
 1. Go to https://console.cloud.google.com/
 2. Create project: `tevi-autopilot`
-3. Enable APIs:
-   - Google Drive API
+3. Enable APIs: **Google Drive API**
 4. Create OAuth2 credentials:
    - Application type: Web application
    - Name: `tevi-autopilot-n8n`
    - Redirect URI: `https://YOUR_N8N_URL/rest/oauth2-credential/callback`
-5. Note: Client ID, Client Secret
+5. Note: **Client ID** and **Client Secret** (goes into N8N Credential)
 
 ### 0.4 Deliverables Check
 
@@ -101,481 +110,16 @@ npx playwright install chromium
 
 ### 1.2 Create server.js
 
-Write complete server.js implementing the 23-step upload flow from PRD.
-
-**Key sections:**
-
-```javascript
-// server.js — Complete implementation
-
-const http = require('http');
-const path = require('path');
-const fs = require('fs');
-const { chromium } = require('playwright');
-const cors = require('cors');
-
-// ── CONFIG ──────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT) || 3004;
-const LOG_FILE = process.env.LOG_FILE || '/home/vps-devata/logs/tevi-upload.log';
-
-// ── HELPERS ──────────────────────────────────────────────────
-function log(msg, level) { ... }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
-function isVideo(p) { return ['.mp4','.mkv','.avi','.mov','.webm','.m4v'].includes(path.extname(p).toLowerCase()); }
-function isPhoto(p) { return ['.jpg','.jpeg','.png','.gif','.webp'].includes(path.extname(p).toLowerCase()); }
-
-// ── LOGIN FLOW ───────────────────────────────────────────────
-async function login(page, email, password) {
-  await page.goto('https://tevi.com/', { waitUntil: 'domcontentloaded' });
-  await sleep(13000); // Wait for page load
-
-  // Click login banner if visible
-  const bannerBtn = await page.$('#nav-login-banner-btn');
-  if (bannerBtn) {
-    await bannerBtn.click();
-    await sleep(2000);
-  }
-
-  // Click "with email"
-  const emailBtn = await page.locator('button', { hasText: /with\s+email/i }).first();
-  await emailBtn.click();
-  await sleep(3000);
-
-  // Fill credentials
-  await page.fill('input[type="email"], input[name="email"]', email);
-  await page.fill('input[type="password"]', password);
-
-  // Submit
-  await page.locator('button[type="submit"]').first().click();
-  await sleep(8000);
-
-  // Poll for UID (login success)
-  const uidFound = await page.waitForFunction(
-    () => !!document.querySelector('#nav-profile-btn, a[href*="/@"]'),
-    { timeout: 60000, polling: 1000 }
-  ).then(() => true).catch(() => false);
-
-  if (!uidFound) {
-    return { success: false, reason: 'login_failed', step: 'login',
-             detail: 'UID not found after 60s poll' };
-  }
-
-  await page.keyboard.press('Escape');
-  await sleep(3000);
-  return { success: true };
-}
-
-// ── UPLOAD FLOW ──────────────────────────────────────────────
-async function uploadContent(page, body) {
-  const { filePath, caption, collection, audienceFree, audiencePaid,
-          audiencePrice, audienceMembership, alwaysMembers, nsfw, type } = body;
-
-  // 1. Verify file exists
-  if (!fs.existsSync(filePath)) {
-    return { success: false, reason: 'file_not_found', step: 'upload',
-             detail: `File not found: ${filePath}` };
-  }
-
-  const isVideoFile = isVideo(filePath);
-
-  // 2. Homepage setup — scroll to init lazy load
-  await page.evaluate(() => window.scrollTo(0, 0));
-  for (let i = 0; i < 3; i++) {
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await sleep(2500);
-  }
-  await sleep(1000);
-
-  // 3. Modal cleanup loop (5x)
-  for (let i = 0; i < 5; i++) {
-    await page.keyboard.press('Escape');
-    await sleep(500);
-    await page.evaluate(() => {
-      const selectors = [
-        '.MuiBackdrop-root', '.MuiModal-root', '.MuiPopover-root', '.MuiMenu-root',
-        '[role="presentation"]'
-      ];
-      selectors.forEach(sel => {
-        document.querySelectorAll(sel).forEach(el => {
-          const s = getComputedStyle(el);
-          if (s.position === 'fixed' || parseInt(s.zIndex) > 1000) el.remove();
-        });
-      });
-    });
-    await sleep(300);
-  }
-  await sleep(1000);
-
-  // 4. Inject mutation observer to auto-remove modals
-  await page.evaluate(() => {
-    const observer = new MutationObserver(() => {
-      ['.MuiBackdrop-root', '.MuiModal-root', '.MuiPopover-root', '.MuiMenu-root']
-        .forEach(sel => document.querySelectorAll(sel).forEach(el => el.remove()));
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-  });
-
-  // 5. Click #nav-create-btn
-  let createClicked = false;
-  const createBtn = await page.$('#nav-create-btn');
-  if (createBtn) {
-    await createBtn.scrollIntoViewIfNeeded();
-    await createBtn.click({ force: true });
-    createClicked = true;
-    await sleep(2000);
-  }
-
-  if (!createClicked) {
-    return { success: false, reason: 'create_btn_not_clicked', step: 'create',
-             detail: '#nav-create-btn not found' };
-  }
-
-  await sleep(8000);
-
-  // 6. Poll for post form
-  const formVisible = await page.waitForFunction(
-    () => !!document.querySelector('#post-form-upload-media-btn, #post-form-root'),
-    { timeout: 45000, polling: 1000 }
-  ).then(() => true).catch(() => false);
-
-  if (!formVisible) {
-    return { success: false, reason: 'post_form_not_visible', step: 'create',
-             detail: 'Post form not visible after 45s' };
-  }
-
-  // 7. File select
-  let fileSelected = false;
-  try {
-    const fc = await page.waitForEvent('filechooser', { timeout: 15000 });
-    await fc.setFiles(filePath);
-    fileSelected = true;
-  } catch {
-    const uploadBtn = await page.$('#post-form-upload-media-icon, #post-form-upload-media-btn');
-    if (uploadBtn) {
-      await uploadBtn.click();
-      await sleep(500);
-      const fc2 = await page.waitForEvent('filechooser', { timeout: 10000 }).catch(() => null);
-      if (fc2) { await fc2.setFiles(filePath); fileSelected = true; }
-    }
-  }
-
-  if (!fileSelected) {
-    return { success: false, reason: 'file_not_selected', step: 'upload',
-             detail: 'File chooser not opened' };
-  }
-
-  // 8. Wait for preview
-  const previewSelector = isVideoFile
-    ? '#post-form-video-preview, video'
-    : '#post-form-photo-preview, img[src*="preview"]';
-
-  for (let i = 0; i < 120; i++) {
-    // Check for unsupported format error
-    const errText = await page.evaluate(() => {
-      const els = document.querySelectorAll('[class*="error"], [class*="unsupported"]');
-      for (const el of els) {
-        const t = el.textContent.toLowerCase();
-        if (t.includes('unsupported') || t.includes('format')) return t;
-      }
-      return null;
-    });
-    if (errText) {
-      return { success: false, reason: 'unsupported_format', step: 'upload',
-               detail: errText };
-    }
-
-    const preview = await page.$(previewSelector);
-    if (preview) break;
-    await sleep(3000);
-
-    if (i === 119) {
-      return { success: false, reason: 'upload_error', step: 'upload',
-               detail: 'Preview not loaded after 6 minutes' };
-    }
-  }
-
-  // 9. Caption
-  const captionInput = await page.$('#post-form-caption-input');
-  if (captionInput) await captionInput.fill(caption || '');
-
-  // 10. Collection
-  if (collection) {
-    const colBtn = await page.$('#post-form-collection-open-btn');
-    if (colBtn) {
-      await colBtn.click();
-      await sleep(2000);
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const dialog = await page.$('#post-form-collection-dialog');
-        if (dialog) {
-          const items = await page.$$('[class*="collection-item"]');
-          for (const item of items) {
-            const text = await item.textContent();
-            if (text.includes(collection)) {
-              await item.click();
-              await sleep(500);
-              await page.keyboard.press('Escape');
-              break;
-            }
-          }
-        }
-        await sleep(1000);
-      }
-    }
-  }
-
-  // 11. Audience
-  if (audiencePaid) {
-    const audienceBtn = await page.$('#post-form-audience-btn');
-    if (audienceBtn) {
-      await audienceBtn.click();
-      await sleep(2000);
-
-      // Uncheck FREE
-      const freeSwitch = await page.$('#post-form-audience-free-switch');
-      if (freeSwitch && await freeSwitch.isChecked()) await freeSwitch.click();
-
-      // Check PAID
-      const paidSwitch = await page.$('#post-form-audience-paid-switch');
-      if (paidSwitch && !(await paidSwitch.isChecked())) await paidSwitch.click();
-
-      // Fill price
-      const priceInput = await page.$('#post-form-audience-star-price-input');
-      if (priceInput) await priceInput.fill(String(audiencePrice || 10));
-
-      // Members switch
-      const needMembers = audienceMembership || alwaysMembers || nsfw;
-      if (needMembers) {
-        const memberSwitch = await page.$('#post-form-audience-members-switch');
-        if (memberSwitch && !(await memberSwitch.isChecked())) await memberSwitch.click();
-      }
-
-      await page.keyboard.press('Escape');
-      await sleep(500);
-    }
-  }
-
-  // 12. Submit
-  const submitBtn = await page.$('#post-form-submit-btn');
-  if (submitBtn) await submitBtn.click();
-  await sleep(3000);
-
-  // 13. Guidelines confirm
-  const guidelinesBtn = await page.$('#post-form-guidelines-confirm-btn');
-  if (guidelinesBtn) await guidelinesBtn.click();
-  await sleep(2000);
-
-  // 14. Agree dialog
-  const isAdult = nsfw || audienceMembership || alwaysMembers;
-  const agreePatterns = isAdult
-    ? ['community', 'guideline', 'agree', 'adult', 'confirm', 'satisfied',
-       'konten dewasa', 'nsfw', 'age', '18+', 'years old', 'persetujuan']
-    : ['community', 'guideline', 'agree', 'adult', 'confirm', 'satisfied'];
-
-  const maxPoll = isAdult ? 400 : 50; // adult: 2min, normal: 15s
-  const pollInterval = 300;
-
-  for (let i = 0; i < maxPoll; i++) {
-    const allButtons = await page.$$('button');
-    for (const btn of allButtons) {
-      const text = (await btn.textContent()).toLowerCase().trim();
-      if (agreePatterns.some(p => text.includes(p))) {
-        await btn.click();
-        await sleep(2000);
-        break;
-      }
-    }
-    await sleep(pollInterval);
-  }
-
-  // 15. Verify post (dialog closed = success)
-  const maxVerify = isAdult ? 600 : 80; // adult: 30min max
-  let postVerified = false;
-  let postError = null;
-
-  for (let i = 0; i < maxVerify; i++) {
-    const dialog = await page.$('#post-form-dialog');
-    if (!dialog) { postVerified = true; break; }
-
-    const errorText = await page.evaluate(() => {
-      const d = document.querySelector('#post-form-dialog');
-      if (!d) return null;
-      const errorEls = d.querySelectorAll('[class*="error"], [class*="failed"]');
-      return errorEls.length > 0 ? errorEls[0].textContent : null;
-    });
-    if (errorText) { postError = errorText; break; }
-
-    // Video stuck detection
-    if (isVideoFile) {
-      const currentTime = await page.evaluate(() => {
-        const v = document.querySelector('video');
-        return v ? v.currentTime : 0;
-      });
-      if (currentTime > 0 && currentTime < 4) {
-        // Check if stuck
-        const stuck = await page.evaluate(() => {
-          window._teviStuckCount = (window._teviStuckCount || 0) + 1;
-          return window._teviStuckCount;
-        });
-        if (stuck >= 8) {
-          await page.evaluate(() => {
-            const v = document.querySelector('video');
-            if (v) v.play().catch(() => {});
-          });
-          await page.evaluate(() => { window._teviStuckCount = 0; });
-        }
-      } else {
-        await page.evaluate(() => { window._teviStuckCount = 0; });
-      }
-    }
-
-    await sleep(3000);
-    if (i === maxVerify - 1) {
-      return { success: false, reason: 'post_unverified', step: 'verify',
-               detail: 'Post dialog not closed after maximum timeout' };
-    }
-  }
-
-  if (postError) {
-    return { success: false, reason: 'post_unverified', step: 'verify',
-             detail: `Post error: ${postError}` };
-  }
-
-  // 16. Get post URL
-  let postUrl = null;
-  for (let i = 0; i < 30; i++) {
-    postUrl = await page.evaluate(() => {
-      if (window.location.href.includes('/post/')) return window.location.href;
-      return null;
-    });
-    if (postUrl) break;
-    await sleep(3000);
-  }
-
-  return { success: true, url: postUrl };
-}
-
-// ── HTTP SERVER ───────────────────────────────────────────────
-const server = http.createServer(async (req, res) => {
-  cors()(req, res, () => {});
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204); res.end(); return;
-  }
-
-  // GET /health
-  if (req.url === '/health' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'ok',
-      uptime: Math.floor(process.uptime()),
-      browser: 'chromium',
-      version: '3.0'
-    }));
-    return;
-  }
-
-  // POST /upload
-  if (req.url === '/upload' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', async () => {
-      let data;
-      try { data = JSON.parse(body); } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, reason: 'invalid_body',
-                                  step: 'parse', detail: 'Invalid JSON' }));
-        return;
-      }
-
-      if (!data.email || !data.password || !data.filePath) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, reason: 'missing_fields',
-                                  step: 'validate',
-                                  detail: 'email, password, filePath required' }));
-        return;
-      }
-
-      try {
-        const result = await withBrowser(async (browser) => {
-          const context = await browser.newContext({
-            viewport: { width: 1280, height: 800 },
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36',
-          });
-          const page = await context.newPage();
-
-          const loginResult = await login(page, data.email, data.password);
-          if (!loginResult.success) {
-            await context.close();
-            return loginResult;
-          }
-
-          return await uploadContent(page, data);
-        });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result.success
-          ? { success: true, uploaded: true, file: path.basename(data.filePath), url: result.url }
-          : result));
-      } catch (err) {
-        log(`Server error: ${err.message}`, 'ERROR');
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, reason: 'upload_error',
-                                  step: 'server', detail: err.message }));
-      }
-    });
-    return;
-  }
-
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ success: false, reason: 'not_found' }));
-});
-
-// ── withBrowser helper ───────────────────────────────────────
-async function withBrowser(fn) {
-  let browser;
-  const CHROMIUM_PATH = process.env.CHROMIUM_PATH || (
-    '/home/vps-devata/.cache/ms-playwright/' +
-    'chromium_headless_shell-1228/' +
-    'chrome-headless-shell-linux64/' +
-    'chrome-headless-shell'
-  );
-
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      executablePath: CHROMIUM_PATH,
-      args: [
-        '--no-sandbox', '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-gpu', '--disable-dev-shm-usage',
-        '--disable-gpu-rasterization', '--disable-gpu-compositing',
-        '--enable-unsafe-webgpu', '--ignore-gpu-blocklist',
-        '--enable-accelerated-video-decode',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-      ]
-    });
-    return await fn(browser);
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-  }
-}
-
-// ── START ───────────────────────────────────────────────────
-ensureDir(path.dirname(LOG_FILE));
-
-server.listen(PORT, () => {
-  log(`TEVI Upload Server v3 started on port ${PORT}`);
-});
-
-process.on('SIGTERM', () => {
-  log('SIGTERM — graceful shutdown');
-  server.close(() => process.exit(0));
-});
-```
+Create `server.js` on VPS at `/home/vps-devata/tevi-upload/server.js`.
+
+**Key points:**
+- No credentials hardcoded
+- All values come from request body
+- Logs to `LOG_FILE` environment variable path
+- Health endpoint at `GET /health`
+- Upload endpoint at `POST /upload`
+
+See the complete implementation in `server.js-reference.md` in this folder.
 
 ### 1.3 Create ecosystem.json
 
@@ -596,7 +140,6 @@ process.on('SIGTERM', () => {
     "env": {
       "NODE_ENV": "production",
       "PORT": "3004",
-      "LOG_LEVEL": "info",
       "LOG_FILE": "/home/vps-devata/logs/tevi-upload.log"
     }
   }]
@@ -617,7 +160,7 @@ pm2 startup  # Enable auto-restart on boot
 
 ```bash
 curl http://localhost:3004/health
-# Expected: {"status":"ok","uptime":...,"browser":"chromium","version":"3.0"}
+# Expected: {"status":"ok","uptime":...,"browser":"chromium","version":"3.1"}
 ```
 
 ### 1.6 Phase 1 Checklist
@@ -644,17 +187,11 @@ Upload to VPS at `/home/vps-devata/tevi-uploads/config.json`:
     "order": [],
     "adultSubRotation": ["hentai", "japanese", "amerika"]
   },
-  "categories": [],
-  "ai": {
-    "enabled": false,
-    "endpoint": "https://gateway.olagon.site/anthropic/v1/messages",
-    "model": "claude-sonnet-4-6",
-    "maxTokens": 200,
-    "retryAttempts": 3,
-    "cacheTTLHours": 24
-  }
+  "categories": []
 }
 ```
+
+**Note**: AI settings are NOT in config.json. They are N8N Variables.
 
 ### 2.2 Create Initial state.json
 
@@ -669,45 +206,152 @@ Upload to VPS at `/home/vps-devata/tevi-uploads/state.json`:
 }
 ```
 
-### 2.3 Create N8N AI Service Credential
+### 2.3 Create N8N Credentials
 
-In N8N UI:
+Create these **before** building workflows:
+
+| Credential | Name in N8N | Fields |
+|-----------|-------------|--------|
+| Custom | `TEVI Account` | `email`, `password` |
+| SSH/SFTP | `VPS SSH/SFTP` | `host`, `port`, `username`, `password` |
+| Google Drive OAuth2 | `Google Drive` | OAuth2 Client ID + Secret |
+| SMTP | `Email SMTP` | `host`, `port`, `user`, `password` |
+| Custom | `AI Service` | `keys` (JSON array of API key strings) |
+
+**How to create AI Service credential:**
 1. Settings → Credentials → Add Credential
-2. Type: Custom (or HTTP Query if available)
+2. Type: Custom
 3. Name: `AI Service`
-4. Fields:
-   - `keys`: Array of API keys (one per line or JSON array)
+4. Add field: `keys`
+5. Value: `["rk_live_key1...", "rk_live_key2..."]` (JSON array)
 
-### 2.4 Create N8N Config Workflow
+### 2.4 Set N8N Variables
+
+Settings → Variables → Add Variable:
+
+| Name | Value | Description |
+|------|-------|-------------|
+| `VPS_UPLOAD_DIR` | `/home/vps-devata/tevi-uploads` | Upload queue path |
+| `VPS_ARCHIVE_DIR` | `/home/vps-devata/tevi-uploads/archive` | Archive path |
+| `VPS_UPLOAD_URL` | `http://13.75.2.24:3004` | VPS server URL |
+| `VPS_LOCK_FILE` | `/home/vps-devata/tevi-uploads/state.json.lock` | Lock file path |
+| `NOTIFY_EMAIL` | `your@email.com` | Notification email |
+| `CRON_SCHEDULE` | `0 * * * *` | Cron expression (every hour) |
+| `AI_ENDPOINT` | `https://gateway.olagon.site/anthropic/v1/messages` | AI API endpoint |
+| `AI_MODEL` | `claude-sonnet-4-6` | AI model name |
+| `AI_MAX_TOKENS` | `200` | Max tokens per request |
+| `AI_RETRY_ATTEMPTS` | `3` | Number of retries |
+| `AI_CACHE_TTL_HOURS` | `24` | Caption cache TTL |
+
+### 2.5 Create N8N Config Workflow
 
 Import `tevi-upload-config.json` to N8N.
 
-Key nodes to implement:
-- Manual Trigger
-- SFTP Download (download config.json)
-- Form Node (custom HTML form)
-- Code nodes (validation, migration, CRUD)
-- SFTP Upload (upload config.json)
+**Critical implementation notes:**
 
-### 2.5 Test Config Workflow
+#### Form Node (User-Friendly UI)
+
+Use N8N's Form node with this pattern:
+
+```html
+<!-- Form Field: Action Selector -->
+<label>What do you want to do?</label>
+<select name="action">
+  <option value="edit">Edit existing category</option>
+  <option value="add">Add new category</option>
+  <option value="delete">Delete category</option>
+  <option value="enable">Enable category</option>
+  <option value="disable">Disable category</option>
+</select>
+
+<!-- Form Field: Category Selector (shown when action=edit/delete/enable/disable) -->
+<label>Select category:</label>
+<select name="categoryId">
+  <!-- Populated dynamically from config -->
+  <option value="photo">📷 Photo</option>
+  <option value="video">🎬 Video</option>
+  <option value="adult">🔞 Adult</option>
+</select>
+
+<!-- Form Field: Category ID (shown when action=add) -->
+<label>Category ID:</label>
+<input type="text" name="categoryId" placeholder="my_category"
+       pattern="[a-z0-9_]{1,30}" required>
+<span class="hint">Alphanumeric + underscore, max 30 chars</span>
+
+<!-- Validation error shown here -->
+<div class="error" id="validation-error" style="display:none; color: red;"></div>
+```
+
+#### Form Validation (Inline Feedback)
+
+```javascript
+// Code node after form submission
+const formData = $input.first().json;
+const errors = [];
+
+// Validate category ID
+if (formData.action === 'add') {
+  if (!formData.categoryId || !/^[a-z0-9_]{1,30}$/.test(formData.categoryId)) {
+    errors.push({
+      field: 'categoryId',
+      message: 'ID: alphanumeric + underscore, max 30 chars'
+    });
+  }
+
+  if (!formData.gdriveFolders || formData.gdriveFolders.length === 0) {
+    errors.push({
+      field: 'gdriveFolders',
+      message: 'At least one GDrive folder required'
+    });
+  }
+}
+
+// Return errors to show in form
+if (errors.length > 0) {
+  return {
+    json: {
+      success: false,
+      errors: errors
+    }
+  };
+}
+
+return { json: { success: true, data: formData } };
+```
+
+#### GDrive Connection Test Button
+
+In the form, add a "Test Connection" button for GDrive Folder ID:
+
+```javascript
+// Code node: Test GDrive Connection
+// Uses Google Drive node to list a single file from the folder ID
+// Returns success or error message
+// Shows result inline in the form
+```
+
+### 2.6 Test Config Workflow
 
 1. Open Config Workflow in N8N
 2. Click "Test Step"
-3. Form should load (or error if no config yet)
-4. Fill form with test data
-5. Save → config.json should upload to VPS
-6. Download config.json from VPS → verify content
+3. Form should load
+4. Try adding a category — validation errors should show inline
+5. Save → config.json uploads to VPS
+6. Verify content on VPS
 
-### 2.6 Phase 2 Checklist
+### 2.7 Phase 2 Checklist
 
 - [ ] config.json uploaded to VPS
 - [ ] state.json uploaded to VPS
-- [ ] AI Service credential created in N8N
+- [ ] All 5 N8N Credentials created
+- [ ] All 9 N8N Variables set
 - [ ] Config Workflow imported to N8N
 - [ ] Config Workflow form loads
+- [ ] Inline validation working
 - [ ] Config save works (upload to VPS)
 - [ ] Config validation works (duplicate ID, empty folder, etc.)
-- [ ] Config migration (v2 → v3) works
+- [ ] GDrive folder test button working
 
 ---
 
@@ -715,42 +359,31 @@ Key nodes to implement:
 
 ### 3.1 Create Credentials in N8N
 
-Create these credentials before building the workflow:
+All 5 credentials from Phase 2 must be created first.
 
-| Credential | Type | Fields |
-|-----------|------|---------|
-| `TEVI Account` | Custom | `email`, `password` |
-| `SSH SFTP` | SFTP | `host`, `port`, `username`, `password` |
-| `Google Drive OAuth2 API` | Google Drive | OAuth2 Client ID + Secret |
-| `Email SMTP` | SMTP | `host`, `port`, `user`, `password` |
-| `AI Service` | Custom | `keys` (array of API keys) |
+### 3.2 Build Main Workflow
 
-### 3.2 Set N8N Variables
-
-Settings → Variables:
-```
-VPS_UPLOAD_DIR = /home/vps-devata/tevi-uploads
-VPS_ARCHIVE_DIR = /home/vps-devata/tevi-uploads/archive
-VPS_UPLOAD_URL = http://13.75.2.24:3004
-VPS_LOCK_FILE = /home/vps-devata/tevi-uploads/state.json.lock
-NOTIFY_EMAIL = your@email.com
-```
-
-### 3.3 Build Main Workflow
-
-Implement `tevi-upload-main.json` following the node list in PRD Phase 3.
+Import `tevi-upload-main.json` to N8N.
 
 **Critical implementations:**
+
+#### Schedule Trigger Node
+
+```javascript
+// Read CRON_SCHEDULE from N8N Variables
+// Default: "0 * * * *" (every hour on the hour)
+// User can change in Settings → Variables
+const schedule = $vars.CRON_SCHEDULE || '0 * * * *';
+return { json: { schedule } };
+```
 
 #### Calculate Rotation Node
 
 ```javascript
-// Input: config.json
-// Output: { selectedCategory, selectedSubType, stateUpdates }
-
 const config = $input.first().json;
 const state = $('Download State').first().json;
 
+// Get enabled categories in rotation order
 const enabledCategories = config.rotation.order
   .map(id => config.categories.find(c => c.id === id))
   .filter(c => c && c.enabled);
@@ -759,7 +392,7 @@ if (enabledCategories.length === 0) {
   throw new Error('NO_CATEGORY_ENABLED');
 }
 
-// Get next category
+// Get next category (index-based, NOT modulo on filtered array)
 const nextIndex = (state.cycleIndex + 1) % enabledCategories.length;
 const category = enabledCategories[nextIndex];
 
@@ -776,30 +409,20 @@ const result = {
 // Handle adult sub-rotation
 if (category.type === 'adult') {
   const enabledSubTypes = category.subTypes.filter(st => st.enabled);
-  if (enabledSubTypes.length === 0) {
-    // No active sub-types, treat as standard
+  if (enabledSubTypes.length > 0) {
+    const subIndex = state.adultSubCycleIndex % enabledSubTypes.length;
+    result.selectedSubType = enabledSubTypes[subIndex];
+    result.stateUpdates.adultSubCycleIndex = (state.adultSubCycleIndex + 1) % enabledSubTypes.length;
+  } else {
     result.selectedSubType = null;
-    return result;
   }
-
-  const subIndex = state.adultSubCycleIndex % enabledSubTypes.length;
-  const subType = enabledSubTypes[subIndex];
-
-  result.selectedSubType = subType;
-  result.stateUpdates.adultSubCycleIndex = (state.adultSubCycleIndex + 1) % enabledSubTypes.length;
 }
 
 // Skip check
 const skipCount = state.categorySkipCount?.[category.id] || 0;
 if (skipCount >= 3) {
-  // Deprioritize this category
   result.skipped = true;
   result.skipReason = 'SKIP_THRESHOLD';
-  result.stateUpdates.categorySkipCount = {
-    ...(state.categorySkipCount || {}),
-    [category.id]: 0,
-    [enabledCategories[nextIndex]?.id]: skipCount
-  };
 }
 
 return result;
@@ -807,96 +430,54 @@ return result;
 
 #### Acquire Lock Node (Atomic SFTP Rename)
 
-```javascript
-// Operation: Execute Command
-// Command: mv state.json state.json.lock (on VPS via SFTP)
-// If rename succeeds → lock acquired
-// If rename fails (file exists) → another workflow running
-
-// Use SFTP Execute Command:
-const result = await this.helpers.sshConnect({
-  host: '13.75.2.24',
-  port: 22,
-  username: 'vps-devata',
-  password: '...'
-});
-
-// Try atomic rename
-const { exec } = require('ssh2').Client;
-const conn = new exec();
-conn.on('ready', () => {
-  conn.exec('mv /home/vps-devata/tevi-uploads/state.json /home/vps-devata/tevi-uploads/state.json.lock', (err, stream) => {
-    if (err) {
-      // Lock failed — another workflow is running
-      throw new Error('LOCK_FAILED');
-    }
-    stream.on('close', () => {
-      conn.end();
-      // Lock acquired
-    });
-  });
-});
-conn.connect({ ... });
-
-// Alternative: Use SFTP node with rename operation
-// SFTP node → operation: rename
-// from: state.json
-// to: state.json.lock
-// If already exists → error → stop
+```
+SFTP Node — operation: rename
+from: {{ $vars.VPS_UPLOAD_DIR }}/state.json
+to: {{ $vars.VPS_UPLOAD_DIR }}/state.json.lock
 ```
 
-Actually, use the SFTP node's `rename` operation directly:
-```
-SFTP Rename:
-  fromPath: {{ $vars.VPS_UPLOAD_DIR }}/state.json
-  toPath: {{ $vars.VPS_UPLOAD_DIR }}/state.json.lock
-```
-If `state.json.lock` already exists, rename fails → workflow stops.
+If `state.json.lock` already exists, rename fails → Error Output → Stop workflow.
 
 #### Save State Node
 
 ```javascript
-// After lock acquired, save updated state
 const state = $('Download State').first().json;
 const rotation = $('Calculate Rotation').first().json;
 
 const newState = {
   ...state,
   cycleIndex: rotation.stateUpdates.cycleIndex,
-  adultSubCycleIndex: rotation.stateUpdates.adultSubCycleIndex || state.adultSubCycleIndex,
-  categorySkipCount: rotation.stateUpdates.categorySkipCount || state.categorySkipCount || {},
+  adultSubCycleIndex: rotation.stateUpdates.adultSubCycleIndex ?? state.adultSubCycleIndex,
+  categorySkipCount: rotation.stateUpdates.categorySkipCount ?? state.categorySkipCount ?? {},
   lastRun: new Date().toISOString()
 };
 
 return { json: newState };
 ```
 
-#### Release Lock Node
+#### GDrive List Node (Loop Over Folders)
+
+For categories with multiple folders:
 
 ```
-SFTP Delete:
-  filePath: {{ $vars.VPS_UPLOAD_DIR }}/state.json.lock
+┌─────────────────────────────────────────────┐
+│  Loop Over Items                             │
+│  Items: {{ $json.selectedCategory.gdriveFolders }}
+│  ┌─────────────────────────────────────────┐ │
+│  │  Google Drive: List Files               │ │
+│  │  Parent: {{ $json.item.json.id }}       │ │
+│  │  Limit: 100                              │ │
+│  └─────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────┐ │
+│  │  Code: Track Folder Source               │ │
+│  │  Add selectedFolderId to each item      │ │
+│  └─────────────────────────────────────────┘ │
+│  └─────────────────────────────────────────┘ │
+│  Collect all items from loop                 │
+└─────────────────────────────────────────────┘
 ```
 
-This always runs — even on error. Use Error Trigger node connected to Release Lock.
-
-### 3.4 Build GDrive List Node
-
-Use N8N Google Drive node. For multiple folders:
-
-**Option A**: Use single node with parent folder ID parameter from config.
-
-**Option B**: Use Code node to generate multiple folder IDs, then use sub-nodes.
-
-For simplicity, use single node with the first folder ID. Add multiple nodes for multiple folders:
-
-```
-For each folder in selectedCategory.gdriveFolders[]:
-  ├── Google Drive node: List files, parent = folder.id
-  └── Code node: Combine results
-```
-
-### 3.5 Build Random Pick Node
+#### Random Pick Node
 
 ```javascript
 const files = $input.all();
@@ -904,17 +485,13 @@ if (!files || files.length === 0) {
   throw new Error('NO_FILES');
 }
 
-// Pick random file
 const randomIndex = Math.floor(Math.random() * files.length);
 const selected = files[randomIndex].json;
-
-// Track which folder it came from
-const folderId = selected.parentFolderId || selected.parents?.[0];
 
 return {
   json: {
     ...selected,
-    selectedFolderId: folderId,
+    selectedFolderId: selected.selectedFolderId || selected.parents?.[0],
     fileName: selected.name,
     gdriveFileId: selected.id,
     gdriveMimeType: selected.mimeType,
@@ -923,21 +500,21 @@ return {
 };
 ```
 
-### 3.6 Build Payload Node
+#### Build Payload Node
 
 ```javascript
 const item = $input.first().json;
 const category = $('Get Category Config').first().json;
-const subType = $('Get Category Config').first().json.selectedSubType;
-const tevi = $credentials.tevi;
+const subType = category.selectedSubType;
+const tevi = $credentials['TEVI Account'];
 const caption = $('Caption Result').first().json.caption;
 
-// Determine effective config (sub-type overrides parent)
+// Resolve effective config (sub-type overrides parent)
 const effective = {
   collection: subType?.collection || category.collection,
   audiencePaid: category.audience === 'paid',
   audienceFree: category.audience === 'free',
-  audiencePrice: subType?.price || category.price,
+  audiencePrice: subType?.price || category.price || 10,
   audienceMembership: category.type === 'adult',
   alwaysMembers: category.type === 'adult',
   nsfw: category.type === 'adult',
@@ -951,13 +528,13 @@ return {
     password: tevi.password,
     filePath: $vars.VPS_UPLOAD_DIR + '/' + item.fileName,
     caption,
-    collection: effective.collection,
-    audienceFree: effective.audienceFree,
-    audiencePaid: effective.audiencePaid,
+    collection: effective.collection || '',
+    audienceFree: effective.audienceFree ?? false,
+    audiencePaid: effective.audiencePaid ?? true,
     audiencePrice: effective.audiencePrice,
-    audienceMembership: effective.audienceMembership,
-    alwaysMembers: effective.alwaysMembers,
-    nsfw: effective.nsfw,
+    audienceMembership: effective.audienceMembership ?? false,
+    alwaysMembers: effective.alwaysMembers ?? false,
+    nsfw: effective.nsfw ?? false,
     type: effective.type,
     sourceFolderId: effective.sourceFolderId,
     fileName: item.fileName,
@@ -975,97 +552,80 @@ function buildArchiveName(fileName, type) {
 }
 ```
 
-### 3.7 SFTP Upload Node (Binary)
-
-```
-operation: upload
-fileName: {{ $json.fileName }}
-path: {{ $vars.VPS_UPLOAD_DIR }}
-options:
-  appendFile: false
-binaryData: true
-inputBinaryFieldName: data
-```
-
-### 3.8 HTTP Request Node
+#### HTTP Request Node
 
 ```
 url: {{ $vars.VPS_UPLOAD_URL }}/upload
 method: POST
 sendBody: true
-bodyParameters:
-  - name: email
-    value: {{ $json.email }}
-  - name: password
-    value: {{ $json.password }}
-  ... (all fields)
+contentType: application/json
+body: |
+  {{ JSON.stringify($json) }}
 options:
-  timeout: 600000
+  timeout: 600000    ← 10 minutes for video
   maxRetries: 3
   retryWaitMillis: 5000
 ```
 
-### 3.9 Archive Node
+#### Release Lock Node (Always Runs)
 
-```
-operation: rename
-fromPath: {{ $vars.VPS_UPLOAD_DIR }}/{{ $json.fileName }}
-toPath: {{ $vars.VPS_ARCHIVE_DIR }}/{{ $json.archiveName }}
-```
+Connect Error Trigger to:
+1. Release Lock (SFTP Delete `{{ $vars.VPS_LOCK_FILE }}`)
+2. Notify Failure (Email)
 
-### 3.10 FIFO Cleanup Node
+Connect success path to:
+1. Release Lock (SFTP Delete `{{ $vars.VPS_LOCK_FILE }}`)
 
-```
-operation: executeCommand
-command: |
-  cd {{ $vars.VPS_ARCHIVE_DIR }} && \
-  ls -t | grep -v '^\.' | tail -n +11 | xargs -d '\n' rm -f 2>/dev/null || true
-```
+### 3.3 Phase 3 Checklist
 
-### 3.11 Error Trigger
-
-Connect error output of all critical nodes to Error Trigger, which connects to Release Lock + Notify Failure.
-
-### 3.12 Phase 3 Checklist
-
-- [ ] All credentials created in N8N
-- [ ] All N8N variables set
-- [ ] Schedule trigger working
+- [ ] All 5 credentials created in N8N
+- [ ] All 9 N8N Variables set
+- [ ] Schedule trigger reads `CRON_SCHEDULE` variable
 - [ ] Config download + validation working
 - [ ] Rotation calculation working (test with 3 categories)
 - [ ] Lock acquisition working (atomic rename)
-- [ ] GDrive listing working
+- [ ] GDrive listing works for multi-folder categories
 - [ ] Random pick working
 - [ ] File download + SFTP upload working
-- [ ] HTTP /upload request working (test with dummy file)
+- [ ] HTTP /upload request working
 - [ ] Archive + FIFO working
-- [ ] Lock release working
-- [ ] Error trigger + lock release on error working
+- [ ] Lock release working on success
+- [ ] Error trigger + lock release on failure working
 - [ ] Email notifications working
-- [ ] Skip threshold working (test with empty folder)
+- [ ] Skip threshold working
 
 ---
 
 ## PHASE 4: AI Caption System
 
-### 4.1 Implement AI Caption Code Node
+### 4.1 AI Credential Architecture
 
-Create a dedicated Code node after "Random Pick" that generates captions.
+**AI keys are stored ONLY in N8N Credential "AI Service".**
+
+Settings are read from N8N Variables:
+- `AI_ENDPOINT` — API endpoint
+- `AI_MODEL` — model name
+- `AI_MAX_TOKENS` — max tokens
+- `AI_RETRY_ATTEMPTS` — retries
+- `AI_CACHE_TTL_HOURS` — cache TTL
+
+AI-related fields in config.json (safe — no keys):
+- `aiTranslate` (boolean per category)
+- `aiPrompt` (string per sub-type)
+
+### 4.2 AI Caption Code Node
+
+Create a dedicated Code node in the Main Workflow.
 
 ```javascript
-// Node: AI Caption Generator
+// AI Caption Generator
 const item = $input.first().json;
 const category = $('Get Category Config').first().json;
 const subType = category.selectedSubType;
 const config = $('Read Config').first().json;
 
 // Determine if AI should be used
-const aiEnabled = config.ai?.enabled && (
-  category.aiTranslate ||
-  (subType?.aiTranslate) ||
-  (category.type === 'adult')
-);
-
+const aiEnabled = subType?.aiTranslate || category.aiTranslate || config.ai?.aiTranslate;
 if (!aiEnabled) {
   // Random caption from pool
   const captions = category.captions || ['Content'];
@@ -1080,20 +640,27 @@ if (!aiEnabled) {
   };
 }
 
-// AI Caption Generation
+// ── AI Caption Generation ──────────────────────────────────────
 const filename = item.fileName;
 const folderId = item.selectedFolderId;
 const type = category.id;
 const subTypeId = subType?.id;
 const captionSuffix = category.captionSuffix || '';
-const prompt = subType?.aiPrompt || category.aiPrompt || config.ai?.aiPrompt || 'Translate to Bahasa Indonesia. Short, natural, max 10 words. No emojis.';
+const prompt = subType?.aiPrompt || category.aiPrompt ||
+  'Translate to Bahasa Indonesia. Short, natural, max 10 words. No emojis.';
 
-// Check cache
-const cache = await checkCaptionCache(filename, folderId);
-if (cache) {
+// Read AI settings from N8N Variables
+const aiEndpoint = $vars.AI_ENDPOINT || 'https://gateway.olagon.site/anthropic/v1/messages';
+const aiModel = $vars.AI_MODEL || 'claude-sonnet-4-6';
+const aiMaxTokens = parseInt($vars.AI_MAX_TOKENS) || 200;
+const aiRetries = parseInt($vars.AI_RETRY_ATTEMPTS) || 3;
+
+// Check cache first
+const cached = await checkCache(filename, folderId);
+if (cached) {
   return {
     json: {
-      caption: buildFinalCaption(cache, type, subTypeId, captionSuffix),
+      caption: buildFinalCaption(cached, type, subTypeId, captionSuffix),
       usedAi: true,
       usedCache: true
     }
@@ -1105,14 +672,12 @@ const cleaned = cleanFilename(filename);
 const indoVersion = replaceIndonesian(cleaned);
 
 // Layer 2: AI Translation
-let translated = await aiTranslate(indoVersion, config.ai, prompt);
-if (!translated || translated === '__FAILED__') {
-  translated = await aiTranslate(cleaned, config.ai, prompt);
-}
+let translated = await aiTranslate(indoVersion);
+if (!translated) translated = await aiTranslate(cleaned);
 
 // Layer 3: Fallback
-if (!translated || translated === '__FAILED__') {
-  translated = `${subTypeId || type} Content ${indoVersion}`;
+if (!translated) {
+  translated = `${subTypeId || type} Video Dewasa ${indoVersion}`;
 }
 
 // Layer 4: Adult word injection
@@ -1122,7 +687,7 @@ translated = injectAdultWords(translated, cleaned);
 const finalCaption = buildFinalCaption(translated, type, subTypeId, captionSuffix);
 
 // Cache
-await setCaptionCache(filename, folderId, translated);
+await setCache(filename, folderId, translated);
 
 return {
   json: {
@@ -1132,22 +697,21 @@ return {
   }
 };
 
-// ── Helpers ──────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────
 
 function cleanFilename(name) {
   return (name || '')
     .replace(/\.\w+$/, '')
     .replace(/[\[\]]/g, '')
-    .replace(/_/g, ' ')
-    .replace(/-/g, ' ')
-    .replace(/\b(uncen|nekop|\.care|xnxx|xvideos|hd|sd|720p|1080p|480p|360p|mp4|mkv|avi|mov|webm|m4v|bluray|discontinued|censored)\b/gi, '')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\b(uncen|nekop|care|xnxx|xvideos|hd|sd|720p|1080p|480p|360p|mp4|mkv|avi|mov|webm|m4v|bluray|discontinued|censored)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 const INDONESIAN_MAP = {
-  'masturbate': 'colmek', 'masturbates': 'colmek', 'masturbation': 'colmek',
-  'breasts': 'dada', 'breast': 'dada', 'tits': 'dada', 'tit': 'dada', 'titties': 'dada',
+  'masturbate': 'colmek', 'masturbation': 'colmek', 'masturbating': 'colmek',
+  'breasts': 'dada', 'breast': 'dada', 'tits': 'dada', 'titties': 'dada',
   'sex': 'seks', 'sexual': 'seks',
   'dick': 'kontol', 'dicks': 'kontol', 'penis': 'kontol',
   'fuck': 'main', 'fucked': 'main', 'fucking': 'main',
@@ -1158,12 +722,12 @@ const INDONESIAN_MAP = {
   'rough': 'main', 'hardcore': 'main', 'extreme': 'main',
   'group': 'grup',
   'outdoor': 'luar ruangan', 'public': 'publik',
-  'stepmom': 'ibu tiri', 'stepmother': 'ibu tiri', 'stepson': 'anak tiri',
+  'stepmom': 'ibu tiri', 'stepmother': 'ibu tiri',
   'pussy': 'memek',
   'cheating': 'selingkuh', 'married': 'menikah',
   'doctor': 'dokter', 'nurse': 'perawat', 'maid': 'pramugari',
-  'idol': 'idol', 'cosplay': 'cosplay', 'cosplayer': 'cosplayer',
-  'jav': 'jav',
+  'cosplay': 'cosplay', 'cosplayer': 'cosplayer',
+  'idol': 'idol', 'jav': 'jav',
 };
 
 function replaceIndonesian(text) {
@@ -1201,23 +765,14 @@ function injectAdultWords(translated, original) {
   return result;
 }
 
-async function aiTranslate(text, aiConfig, prompt) {
-  const keys = $credentials.aiService?.keys || [];
-  if (!keys || keys.length === 0) return '__FAILED__';
+async function aiTranslate(text) {
+  const keys = $credentials['AI Service']?.keys || [];
+  if (!keys || keys.length === 0) return null;
 
-  const endpoint = aiConfig?.endpoint || 'https://gateway.olagon.site/anthropic/v1/messages';
-  const model = aiConfig?.model || 'claude-sonnet-4-6';
-  const maxTokens = aiConfig?.maxTokens || 200;
-  const retries = aiConfig?.retryAttempts || 3;
-
-  let keyIdx = 0;
-
-  for (let attempt = 0; attempt < retries; attempt++) {
-    const apiKey = keys[keyIdx % keys.length];
-    keyIdx++;
-
+  for (let attempt = 0; attempt < aiRetries; attempt++) {
+    const apiKey = keys[attempt % keys.length];
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch(aiEndpoint, {
         method: 'POST',
         headers: {
           'x-api-key': apiKey,
@@ -1225,12 +780,9 @@ async function aiTranslate(text, aiConfig, prompt) {
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          messages: [{
-            role: 'user',
-            content: `${prompt}\n"${text}"`
-          }]
+          model: aiModel,
+          max_tokens: aiMaxTokens,
+          messages: [{ role: 'user', content: `${prompt}\n"${text}"` }]
         })
       });
 
@@ -1239,24 +791,15 @@ async function aiTranslate(text, aiConfig, prompt) {
       const json = await response.json();
       const blocks = json.content || [];
       const textBlock = blocks.find(b => b.type === 'text')?.text || '';
-
-      if (textBlock) {
-        const extracted = extractTranslation(textBlock);
-        if (extracted) return extracted;
-      }
-
-      // Also check thinking block
       const thinking = blocks.find(b => b.type === 'thinking')?.thinking || '';
-      if (thinking) {
-        const extracted = extractTranslation(thinking);
+
+      for (const source of [textBlock, thinking]) {
+        const extracted = extractTranslation(source);
         if (extracted) return extracted;
       }
-    } catch (e) {
-      // Continue to next retry
-    }
+    } catch {}
   }
-
-  return '__FAILED__';
+  return null;
 }
 
 function extractTranslation(text) {
@@ -1264,10 +807,10 @@ function extractTranslation(text) {
   const clean = text.replace(/[*_`#]/g, '').trim();
 
   // Strategy 1: Quoted string
-  const quotes = [...clean.matchAll(/"([A-Za-z0-9\sÀ-ɏḀ-ỿÀ-ÿ一-鿿]{3,65})"/g)];
+  const quotes = [...clean.matchAll(/"([A-Za-z0-9\sÀ-ɏḀ-ỿ一-鿿]{3,65})"/g)];
   if (quotes.length > 0) {
     const last = quotes[quotes.length - 1][1].trim();
-    if (!/translate|should|short|natural|under|within|max|word|keep|help|adult|declin|legitimate|request/i.test(last)) {
+    if (!/translate|should|short|natural|under|within|max|word|keep|help|adult|declin/i.test(last)) {
       return last;
     }
   }
@@ -1276,7 +819,7 @@ function extractTranslation(text) {
   const bullets = [...clean.matchAll(/^[\-\*]\s+(.+)$/gm)];
   if (bullets.length > 0) {
     const last = bullets[bullets.length - 1][1].trim();
-    if (!/^the|^and|^jav\s*=|means|translate|refer|adult|porn|genre|search|term|acronym/i.test(last)) {
+    if (!/^the|^and|^jav\s*=|means|translate|refer|adult|porn|genre|search/i.test(last)) {
       return last;
     }
   }
@@ -1289,8 +832,10 @@ function extractTranslation(text) {
   }
 
   // Strategy 4: Indonesian sentences
-  const sentences = clean.split(/[.\n]/).map(s => s.trim()).filter(s => s.length > 4 && s.length < 70);
-  const ID_KNOWN = /^(javan|idol|jav|cosplay|maid|onsen|kompilasi|video|dewasa|cewek|gadis|perawat|seksi|seragam|bokong|pantat|dada|kontol|alat|vital|colmek|masturbasi|anal|seks|main|grup|publik|remaja|muda|telanjang|intim|vaginal|orgasme|memek|besar|kecil|luar|dalam|ranjang|kamar|pakai|sendiri|seksi|pantai|liburan|ibu|tiri|anak|hukuman|disiplin|terlarang|daging|wanita|menikah|selingkuh|koleksi|adegan|dokter|medis|konten|bugil|porno|oil|massage|hot)$/i;
+  const sentences = clean.split(/[.\n]/).map(s => s.trim())
+    .filter(s => s.length > 4 && s.length < 70);
+
+  const ID_KNOWN = /^(javan|idol|jav|cosplay|maid|onsen|kompilasi|video|dewasa|cewek|gadis|perawat|seksi|seragam|bokong|pantat|dada|kontol|vital|colmek|masturbasi|anal|seks|main|grup|publik|remaja|muda|telanjang|intim|vaginal|orgasme|memek|besar|kecil|luar|dalam|ranjang|kamar|pakai|sendiri|seksi|pantai|liburan|ibu|tiri|anak|hukuman|disiplin|terlarang|daging|wanita|menikah|selingkuh|koleksi|adegan|dokter|medis|konten|bugil|porno|oil|massage|hot)$/i;
 
   for (let i = sentences.length - 1; i >= 0; i--) {
     const s = sentences[i];
@@ -1307,34 +852,31 @@ function extractTranslation(text) {
 
 function buildFinalCaption(translated, type, subTypeId, suffix) {
   const formattedSuffix = suffix ? `\n\n${suffix}` : '';
-
   if (type === 'adult') {
     switch (subTypeId) {
-      case 'japanese':
-        return `(JAV) ${translated}${formattedSuffix}`;
-      case 'amerika':
-        return `[Amerika] ${translated}${formattedSuffix}`;
-      case 'hentai':
-      default:
-        return `${translated}${formattedSuffix}`;
+      case 'japanese': return `(JAV) ${translated}${formattedSuffix}`;
+      case 'amerika':  return `[Amerika] ${translated}${formattedSuffix}`;
+      default:         return `${translated}${formattedSuffix}`;
     }
   }
-
   return `${translated}${formattedSuffix}`;
 }
 
-// ── Cache helpers (SFTP) ─────────────────────────────────────
+// ── Cache (SFTP-based) ─────────────────────────────────────────
 
-async function checkCaptionCache(filename, folderId) {
-  // Read .caption_cache.json from VPS
+async function checkCache(filename, folderId) {
+  // Uses ssh2 npm package
+  // Reads .caption_cache.json from VPS
+  // Returns cached caption if valid (within TTL)
   const { Client } = require('ssh2');
   const conn = new Client();
+  const cachePath = `${$vars.VPS_ARCHIVE_DIR}/.caption_cache.json`;
+  const ttlMs = (parseInt($vars.AI_CACHE_TTL_HOURS) || 24) * 3600000;
 
   try {
-    const cachePath = `${$vars.VPS_ARCHIVE_DIR}/.caption_cache.json`;
-    const cacheContent = await new Promise((resolve, reject) => {
+    const content = await new Promise((resolve) => {
       conn.sftp((err, sftp) => {
-        if (err) { reject(err); return; }
+        if (err) { resolve(null); return; }
         sftp.readFile(cachePath, 'utf8', (err, data) => {
           if (err) { resolve(null); return; }
           resolve(data);
@@ -1342,19 +884,12 @@ async function checkCaptionCache(filename, folderId) {
       });
     });
 
-    if (!cacheContent) return null;
-
-    const cache = JSON.parse(cacheContent);
+    if (!content) return null;
+    const cache = JSON.parse(content);
     const key = `${filename}_${folderId}`;
     const entry = cache[key];
-
     if (!entry) return null;
-
-    const ttlMs = ($('Read Config').first().json.ai?.cacheTTLHours || 24) * 3600000;
-    if (Date.now() - new Date(entry.cachedAt).getTime() > ttlMs) {
-      return null;
-    }
-
+    if (Date.now() - new Date(entry.cachedAt).getTime() > ttlMs) return null;
     return entry.caption;
   } catch {
     return null;
@@ -1363,17 +898,15 @@ async function checkCaptionCache(filename, folderId) {
   }
 }
 
-async function setCaptionCache(filename, folderId, caption) {
+async function setCache(filename, folderId, caption) {
   const { Client } = require('ssh2');
   const conn = new Client();
+  const cachePath = `${$vars.VPS_ARCHIVE_DIR}/.caption_cache.json`;
 
   try {
-    const cachePath = `${$vars.VPS_ARCHIVE_DIR}/.caption_cache.json`;
-
-    // Read existing cache
     let cache = {};
     try {
-      cache = JSON.parse(await new Promise((resolve, reject) => {
+      cache = JSON.parse(await new Promise((resolve) => {
         conn.sftp((err, sftp) => {
           if (err) { resolve('{}'); return; }
           sftp.readFile(cachePath, 'utf8', (err, data) => {
@@ -1385,33 +918,26 @@ async function setCaptionCache(filename, folderId, caption) {
     } catch {}
 
     const key = `${filename}_${folderId}`;
-    cache[key] = {
-      caption,
-      cachedAt: new Date().toISOString()
-    };
+    cache[key] = { caption, cachedAt: new Date().toISOString() };
 
-    // Write back
     await new Promise((resolve, reject) => {
       conn.sftp((err, sftp) => {
         if (err) { reject(err); return; }
-        const content = JSON.stringify(cache, null, 2);
-        const buffer = Buffer.from(content, 'utf8');
-        const writeStream = sftp.createWriteStream(cachePath);
-        writeStream.on('close', () => resolve());
-        writeStream.on('error', reject);
-        writeStream.write(buffer);
-        writeStream.end();
+        const buf = Buffer.from(JSON.stringify(cache, null, 2));
+        const stream = sftp.createWriteStream(cachePath);
+        stream.on('close', resolve);
+        stream.on('error', reject);
+        stream.write(buf);
+        stream.end();
       });
     });
-  } catch {
-    // Cache write failed — continue without caching
-  } finally {
+  } catch {} finally {
     conn.end();
   }
 }
 ```
 
-### 4.2 Test AI Caption
+### 4.3 Test AI Caption
 
 1. Create a test folder in GDrive with a JAV filename
 2. Run workflow manually
@@ -1421,15 +947,16 @@ async function setCaptionCache(filename, folderId, caption) {
    - Caption has proper format: `(JAV) {translated}\n\n{suffix}`
    - Cache was saved to `.caption_cache.json`
 
-### 4.3 Phase 4 Checklist
+### 4.4 Phase 4 Checklist
 
+- [ ] AI keys stored in N8N Credential only
+- [ ] AI settings from N8N Variables (not config.json)
 - [ ] Indonesian word map working
 - [ ] AI translation working
 - [ ] Adult word injection working
 - [ ] Fallback working (test with bad API key)
 - [ ] Cache working (re-upload same file → no API call)
 - [ ] Per-type caption template working
-- [ ] Per-subType AI prompt working
 - [ ] Retry logic working
 
 ---
@@ -1438,20 +965,18 @@ async function setCaptionCache(filename, folderId, caption) {
 
 ### 5.1 Unit Tests
 
-Test each component independently:
-
 **Config validation:**
-- Empty categories array → should error
+- Empty categories → should error
 - Duplicate category ID → should error
 - Category without folder → should error
 - Adult with no active sub-types → should error
-- v2 config → should migrate to v3
 
 **Rotation:**
 - 3 categories, 6 runs → each category twice
 - 2 categories, 4 runs → each category twice
 - 1 category, 5 runs → same category 5 times
 - Disable middle category → should skip
+- Skip threshold (3 empty) → deprioritize
 
 **AI Caption:**
 - Empty cache → AI call made
@@ -1462,33 +987,23 @@ Test each component independently:
 
 ### 5.2 Integration Tests
 
-**Test flow:**
-1. Upload a photo file to VPS manually
-2. Run Config Workflow to set up 1 category (photo only)
+1. Upload a photo file to GDrive
+2. Set up photo category in Config Workflow
 3. Run Main Workflow manually
-4. Check:
+4. Verify:
    - File uploaded to TEVI
    - Caption correct
    - Archive file created
    - State updated
    - Lock released
 
-**Test with video:**
-1. Upload a video file to VPS
-2. Run workflow with video category
-3. Check: video upload works
-
-**Test with adult:**
-1. Set up adult category
-2. Run workflow with adult category
-3. Check: AI caption generated, members-only enforced
-
 ### 5.3 Concurrency Tests
 
-1. Start workflow (it will acquire lock)
-2. Immediately trigger workflow again (should stop with "lock failed")
-3. Wait for first workflow to complete
-4. Trigger second workflow → should succeed
+1. Start workflow (acquires lock)
+2. Immediately trigger workflow again
+3. Second workflow should stop with "Lock Failed"
+4. Wait for first workflow to complete
+5. Second workflow → should succeed
 
 ### 5.4 Phase 5 Checklist
 
@@ -1496,7 +1011,6 @@ Test each component independently:
 - [ ] Rotation tests pass
 - [ ] AI caption tests pass
 - [ ] Integration: photo upload works
-- [ ] Integration: video upload works
 - [ ] Integration: adult upload + AI caption works
 - [ ] Concurrency: lock prevents overlap
 - [ ] Error handling: lock released on error
@@ -1506,28 +1020,18 @@ Test each component independently:
 
 ## PHASE 6: Documentation
 
-### 6.1 Create docs/ folder
+Create `docs/` folder with these files:
 
-```
-docs/
-├── SETUP.md           — VPS + N8N + GDrive + TEVI setup
-├── TEVISETUP.md       — TEVI account, collections, settings
-├── GDRIVESETUP.md     — GDrive API, folder structure, sharing
-├── CONFIG.md          — Config Workflow guide, form fields
-├── AI.md             — AI caption system, word maps, caching
-└── TROUBLESHOOT.md   — Common issues + solutions
-```
+| File | Content |
+|------|---------|
+| `SETUP.md` | VPS + N8N + GDrive + TEVI complete setup |
+| `TEVISETUP.md` | TEVI account setup, collections, settings |
+| `GDRIVESETUP.md` | GDrive API, folder structure, sharing |
+| `CONFIG.md` | Config Workflow guide, form fields, validation |
+| `AI.md` | AI caption system, word maps, caching |
+| `TROUBLESHOOT.md` | Common issues + solutions |
 
-### 6.2 README.md
-
-Update README with:
-- Current status
-- Architecture diagram
-- Quick start guide
-- Documentation links
-- Feature list
-
-### 6.3 Phase 6 Checklist
+### 6.1 Phase 6 Checklist
 
 - [ ] SETUP.md written
 - [ ] TEVISETUP.md written
@@ -1543,40 +1047,44 @@ Update README with:
 
 ### 7.1 Code Cleanup
 
-- Remove all `console.log` used for debugging
-- Add proper logging throughout
-- Remove commented-out code
-- Ensure no hardcoded values (all from config)
-- Check for secrets in code (none should exist)
+- [ ] No `console.log` in production code
+- [ ] No hardcoded credentials anywhere
+- [ ] No credentials in workflow JSON (exported)
+- [ ] `.env.example` has placeholder values only
+- [ ] `.gitignore` excludes `.env`, `node_modules/`, `tevi-uploads/`
 
-### 7.2 Security Audit
+### 7.2 Security Audit Checklist
 
-- [ ] No credentials in server.js
-- [ ] No credentials in workflow JSON
-- [ ] No credentials in docs
-- [ ] .env.example has placeholders only
-- [ ] AI keys in N8N Credential only
-- [ ] SSH credentials in N8N Credential only
+- [ ] AI API keys only in N8N Credential "AI Service"
+- [ ] TEVI email/password only in N8N Credential "TEVI Account"
+- [ ] VPS SSH credentials only in N8N Credential "VPS SSH/SFTP"
+- [ ] SMTP credentials only in N8N Credential "Email SMTP"
+- [ ] config.json has NO credentials (only IDs + folder references)
+- [ ] config.json has NO AI keys (settings from N8N Variables)
+- [ ] server.js has NO credentials
+- [ ] phases.md uses `$credentials.CREDENTIAL_NAME` pattern, not hardcoded values
+- [ ] `.env.example` contains only placeholder text like `your-vps-ip`
 
 ### 7.3 Deploy to Production
 
+On VPS:
 ```bash
-# On VPS
 cd /home/vps-devata/tevi-upload
-git pull  # or upload new files
+git pull  # or upload new files via SFTP
 pm2 restart tevi-upload
 pm2 save
 ```
 
 ### 7.4 N8N Production
 
-- Export workflow JSON
-- Import to production N8N
-- Activate workflow
-- Set credentials
-- Set variables
+1. Export `tevi-upload-main.json` from N8N
+2. Export `tevi-upload-config.json` from N8N
+3. Import to production N8N instance
+4. Create all 5 credentials (values stay in N8N database)
+5. Set all 9 N8N Variables
+6. Activate workflows
 
-### 7.5 Monitoring Setup
+### 7.5 Monitoring
 
 ```bash
 # PM2 monitoring
@@ -1585,17 +1093,17 @@ pm2 monit
 # View logs
 pm2 logs tevi-upload --lines 100
 
-# N8N workflow executions
-# Check N8N UI → Workflows → tevi-upload → Executions
+# N8N executions
+# Settings → Workflows → tevi-upload → Executions
 ```
 
 ### 7.6 Phase 7 Checklist
 
-- [ ] Debug code removed
-- [ ] No secrets in code
+- [ ] No hardcoded credentials found
 - [ ] Security audit passed
 - [ ] server.js deployed to VPS
-- [ ] N8N workflow activated
+- [ ] PM2 auto-restart enabled
+- [ ] N8N workflows activated
 - [ ] Monitoring setup
 - [ ] Initial test upload successful
 - [ ] Documentation complete
@@ -1632,9 +1140,9 @@ WEEK 4: Launch
 
 | Issue | Rollback Action |
 |-------|-----------------|
-| Workflow stuck in loop | PM2 restart server.js, deactivate N8N workflow |
-| Lock not releasing | SSH to VPS, `rm state.json.lock` |
-| Config corrupted | Restore from backup: `git checkout config.json` |
-| AI caption generating bad content | Disable AI in config: `ai.enabled: false` |
-| TEVI rate limited | Add delay between uploads: increase cron interval |
-| All uploads failing | Check VPS logs: `pm2 logs tevi-upload` |
+| Workflow stuck in loop | `pm2 restart tevi-upload`, deactivate N8N workflow |
+| Lock not releasing | SSH: `rm /home/vps-devata/tevi-uploads/state.json.lock` |
+| Config corrupted | Re-run Config Workflow to restore |
+| AI caption generating bad content | Set `aiTranslate: false` in config.json |
+| TEVI rate limited | Change `CRON_SCHEDULE` to longer interval |
+| All uploads failing | `pm2 logs tevi-upload` → check server errors |
